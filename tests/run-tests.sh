@@ -518,12 +518,12 @@ check "pull with positional remote/branch and --set-upstream succeeds" '[ '"$rc"
 check "the upstream tracking is now set" '[ "$(git rev-parse --abbrev-ref main@{upstream} 2>/dev/null)" = "origin/main" ]'
 check "upstream content applied" 'grep -q "^seven$" b.txt'
 
-echo "== S28 unknown options with a space value are passed through in one piece =="
+echo "== S28 options that take a separate value are relayed in one piece =="
 mk s28
 pushseed s28 bash -c 'sed -i "s/^7$/seven/" b.txt'
 cd "$WORKROOT/s28/work" || exit 1
-run --negotiation-tip origin/main >"$WORKROOT/s28.log" 2>&1; rc=$?
-check "--negotiation-tip <value> relays without eating the value" '[ '"$rc"' -eq 0 ]'
+run -s recursive >"$WORKROOT/s28.log" 2>&1; rc=$?
+check "-s <strategy> relays without eating the value" '[ '"$rc"' -eq 0 ]'
 check "upstream content applied" 'grep -q "^seven$" b.txt'
 
 echo ""
