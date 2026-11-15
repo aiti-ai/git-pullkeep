@@ -1,0 +1,72 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: git version
+        run: git --version
+      - name: run test suite
+        shell: bash
+        run: bash tests/run-tests.sh
+      - name: smoke test as a git subcommand
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/pkbin"
+          cp git-pullkeep "$RUNNER_TEMP/pkbin/git-pullkeep"
+          chmod +x "$RUNNER_TEMP/pkbin/git-pullkeep"
+          export PATH="$RUNNER_TEMP/pkbin:$PATH"
+          git help -a | grep -q pullkeep
+          git pullkeep -h >/dev/null
+          git pullkeep --version
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+      # Blocking: real bugs only (SC1xxx parse/quoting errors).
+      # Warnings are intentionally non-blocking: the script relies on deliberate word
+      # splitting of "$GIT" and on eval'd assertions in the test suite.
+      - name: shellcheck (errors are blocking)
+        run: |
+          shellcheck -S error -s bash git-pullkeep
+          shellcheck -S error -s bash tests/run-tests.sh
+          shellcheck -S error -s sh   install.sh
+      - name: shellcheck (full report, informational)
+        continue-on-error: true
+        run: |
+          shellcheck -s bash git-pullkeep
+          shellcheck -s bash tests/run-tests.sh
+          shellcheck -s sh   install.sh
+
+  posix-sh:
+    name: dash + sh syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install.sh must be POSIX sh
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq dash
+          dash -n install.sh
+      - name: git-pullkeep must parse under bash 3.2 (macOS system bash)
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash -n ./git-pullkeep

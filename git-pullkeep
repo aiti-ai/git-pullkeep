@@ -1,0 +1,725 @@
+#!/usr/bin/env bash
+# git-pullkeep -- complete a pull when the working tree is dirty and local edits overlap upstream
+#
+# Difference from `git pull --autostash`:
+#   autostash hides the WHOLE working tree and applies it back in one go; with many dirty
+#   files (large submodules commonly have 70+) the pop step is one big three-way merge with
+#   a wide conflict surface and a painful recovery story.
+#   pullkeep parks ONLY the few files that actually block the pull; every other dirty file
+#   never leaves the working tree. The temp commit and the merge commit are collapsed again
+#   with reset --mixed, so the result equals "stash -> pull -> pop" with a minimal footprint,
+#   plus an exact rollback through `--undo`.
+#
+# Usage: see `git pullkeep -h` (use -h: `--help` is hijacked by git for man/HTML lookup).
+#
+# All runtime messages are ASCII English so Windows PowerShell consoles (GBK) stay readable.
+#
+# Safety: the temporary commit carries a "pullkeep-temp:" trailer (stamp, base, upstream) and is
+# also recorded in .git/pullkeep-meta/<stamp>. A later run refuses to start while such a commit
+# is still reachable from HEAD, and `--recover` collapses it again -- so an interrupted run can
+# never turn "wip: pullkeep temp commit" into a permanent commit.
+
+set -uo pipefail
+
+PROG=git-pullkeep
+VERSION=0.1.1
+GIT="git -c core.quotepath=false"
+
+# Marker written into the temp commit, so leftovers stay detectable without any state file.
+TEMP_MARK="wip: pullkeep temp commit"
+TEMP_TRAILER="pullkeep-temp:"
+# How many commits back to look for a leftover temp commit (override: PULLKEEP_SCAN).
+SCAN=${PULLKEEP_SCAN:-50}
+
+MODE=run
+YES=0
+NOFETCH=0
+KEEP=5
+STRATEGY=merge
+# The rebase flavour as typed by the user (--rebase, --rebase=merges, -r=merges), so
+# `--rebase=merges` keeps preserving merge commits instead of being downgraded silently.
+REBASE_OPT=""
+REMOTE=""
+BRANCH=""
+declare -a pull_args=()
+declare -a fetch_args=()
+
+say()  { printf '%s\n' "$*"; }
+warn() { printf '%s: warning: %s\n' "$PROG" "$*" >&2; }
+err()  { printf '%s: %s\n' "$PROG" "$*" >&2; }
+die()  { local m="$1"; local c="${2:-40}"; err "$m"; exit "$c"; }
+
+usage() {
+  cat <<'USAGE'
+usage: git pullkeep [options] [<remote> [<branch>]] [git-pull options]
+
+Pull the current branch upstream while keeping every uncommitted change.
+Only the files that actually block the pull are parked in a temporary commit;
+every other dirty file never leaves the working tree. No stash is created.
+
+pullkeep options:
+  --dry-run              analyse only: report incoming/blocking files, change nothing
+  --check                exit 10 if the pull would have to park anything (for CI)
+  --continue, --finish   after resolving conflicts, collapse temp/merge commits
+  --abort, --undo        restore the working tree from before the last run
+  --recover              collapse a temp commit left behind by an interrupted run
+                         (refuses to act when the target would be ambiguous)
+  -y, --yes              do not ask for confirmation (required for --undo when not a tty)
+  --no-fetch             skip the pre-flight fetch (use the current remote-tracking ref)
+  --keep-backups=N       keep N backups under refs/pullkeep/ (default 5)
+  -h, --help             this help            --version  print version
+
+git-pull options relayed verbatim:
+  --rebase[=merges] -r   rebase instead of merge. NOTE: rebase needs a clean tree, so
+                         *all* dirty tracked files are parked and restored afterwards.
+  --no-rebase            merge (default; overrides pull.rebase in your config)
+  --no-ff --ff --no-edit --edit --no-verify --no-verify-signatures --signoff
+  --log --no-log --stat --no-stat -n --summary --quiet -q --verbose -v --progress
+  -X<option>             merge strategy option, e.g. -X ours
+  -s <strategy>          merge strategy, e.g. -s ort
+  --prune -p --tags --no-tags --force -f --depth=N --deepen=N --jobs=N -jN
+
+rejected on purpose (exit 21):
+  --ff-only              we must create a local commit to move blockers out of the way
+  --squash --no-commit   no commit layer is created, so there is nothing to collapse
+  --allow-unrelated-histories  no merge base means no overlap analysis
+  --all                  fetch --all rejects explicit refspecs, and pullkeep
+                         always fetches one named remote
+
+exit codes:
+  0 ok | 2 bad command line | 10 --check would park files
+  20 conflicts need a human, or the pull itself failed | 21 rejected option
+  30 repository or environment problem (no repo, detached HEAD, no upstream, fetch failed,
+     identity not configured) | 31 unfinished merge/rebase or leftover temp commit
+  35 another pullkeep run is already working here | 40 internal error
+
+backups: refs/pullkeep/<stamp> (worktree snapshot) + .git/pullkeep-meta/<stamp>
+aside  : .git/pullkeep-aside/<stamp> (untracked files that upstream now owns)
+lock   : .git/pullkeep.lock (one mutating run at a time, exit 35 while it is held)
+temp   : the parked commit is tagged "wip: pullkeep temp commit" + a pullkeep-temp: trailer,
+         so a later run can still detect it (and `--recover` can collapse it)
+USAGE
+}
+
+reject() { err "$1"; err "try: ${2:-git pullkeep -h}"; exit 21; }
+
+# ------------------------------------------------------------------ argument parsing
+while [ $# -gt 0 ]; do
+  a="$1"
+  case "$a" in
+    -h|--help)                    MODE=help ;;
+    --version)                    MODE=version ;;
+    --dry-run)                    MODE=dry ;;
+    --check)                      MODE=check ;;
+    --continue|--finish)          MODE=finish ;;
+    --abort|--undo)               MODE=undo ;;
+    --recover)                    MODE=recover ;;
+    -y|--yes)                     YES=1 ;;
+    --no-fetch)                   NOFETCH=1 ;;
+    --keep-backups=*)             KEEP="${a#*=}" ;;
+    --autostash)                  warn "--autostash ignored: pullkeep never uses stash" ;;
+    # ---- rejected combinations
+    --ff-only)
+      reject "--ff-only cannot work with pullkeep: pullkeep commits blocked files locally, so the update is never a fast-forward." \
+             "git pull --ff-only --autostash" ;;
+    --squash)
+      reject "--squash is incompatible: it creates no commit to collapse afterwards." \
+             "git pull --squash  (on a clean tree)" ;;
+    --no-commit)
+      reject "--no-commit is incompatible: pullkeep needs the commit layer to restore your changes." ;;
+    --allow-unrelated-histories)
+      reject "--allow-unrelated-histories is incompatible: without a merge base there is no overlap to analyse." ;;
+    --all)
+      reject "--all cannot be relayed: 'git fetch --all' rejects explicit refspecs, and pullkeep always fetches one named remote." \
+             "git pullkeep  (fetches the current remote; run once per remote)" ;;
+    --rebase=interactive|--rebase=i|-i)
+      reject "--rebase=interactive needs a terminal and cannot be scripted." "git pull --rebase  (plain rebase)" ;;
+    # ---- strategy
+    --rebase|-r)                  STRATEGY=rebase; REBASE_OPT=--rebase ;;
+    --rebase=*)                   STRATEGY=rebase; REBASE_OPT="$a" ;;
+    -r=*)                         STRATEGY=rebase; REBASE_OPT="--rebase=${a#-r=}" ;;
+    --no-rebase)                  STRATEGY=merge ;;
+    # ---- fetch options: relayed to git pull and to the pre-flight fetch
+    -p|--prune|--tags|--no-tags|--all|--force|-f|--no-progress|--progress)
+                                  fetch_args+=("$a"); pull_args+=("$a") ;;
+    --depth=*|--deepen=*|--shallow-since=*|--shallow-exclude=*|--jobs=*)
+                                  fetch_args+=("$a"); pull_args+=("$a") ;;
+    -j*)                          fetch_args+=("$a"); pull_args+=("$a") ;;
+    # ---- merge options with a separate value
+    -X|-s|--strategy)
+      [ $# -ge 2 ] || die "$a needs a value" 2
+      pull_args+=("$a" "$2"); shift ;;
+    # ---- merge / output options
+    -X*|-s*|--strategy=*|--no-ff|--ff|--no-edit|--edit|--no-verify|--no-verify-signatures|\
+    --signoff|--log|--no-log|--stat|--no-stat|-n|--summary|--quiet|-q|--verbose|-v)
+                                  pull_args+=("$a") ;;
+    --) break ;;
+    -*)                           err "unknown option: $a"; err "try: git pullkeep -h"; exit 2 ;;
+    *)
+      if [ -z "$REMOTE" ]; then
+        REMOTE="$a"
+      elif [ -z "$BRANCH" ]; then
+        BRANCH="$a"
+      else
+        err "too many arguments: $a"; err "try: git pullkeep -h"; exit 2
+      fi ;;
+  esac
+  shift
+done
+
+case "$MODE" in
+  help)    usage; exit 0 ;;
+  version) printf '%s %s\n' "$PROG" "$VERSION"; exit 0 ;;
+esac
+
+case "$KEEP" in ''|*[!0-9]*) die "--keep-backups must be a number" 2 ;; esac
+
+# ------------------------------------------------------------------ repository context
+command -v git >/dev/null 2>&1 || die "git not found" 30
+git rev-parse --git-dir >/dev/null 2>&1 || die "not a git repository" 30
+gdir=$(git rev-parse --absolute-git-dir) || die "cannot locate the git dir" 30
+
+# --absolute-git-dir points at .git/worktrees/<name> inside a linked worktree, while refs (and
+# therefore refs/pullkeep/) are shared with the main checkout. The lock and the metadata must
+# be shared too, otherwise two worktrees could rewrite the same refs at the same time.
+common_dir=$(git rev-parse --git-common-dir 2>/dev/null) || common_dir=$gdir
+case "$common_dir" in
+  /*|[A-Za-z]:*) ;;
+  *) common_dir=$(cd "$common_dir" 2>/dev/null && pwd) || common_dir=$gdir ;;
+esac
+
+meta_dir="$common_dir/pullkeep-meta"
+newest_backup() {
+  git for-each-ref --sort=-committerdate --format='%(refname)' refs/pullkeep/ 2>/dev/null | head -n 1
+}
+
+# Leftover detection: a temp commit is any commit in the last $SCAN whose message carries the
+# marker. The message alone is enough, so detection still works when .git/ metadata is gone
+# (fresh clone, cleaned repo) or the branch was moved.
+temp_commits() {
+  git log -n "$SCAN" --format='%H %s' --grep="$TEMP_MARK" HEAD 2>/dev/null | grep -F "$TEMP_MARK"
+}
+# temp_field <sha> <field>: read one field out of the "pullkeep-temp:" trailer.
+temp_field() {
+  git log -1 --format=%B "$1" 2>/dev/null \
+    | sed -n "/^$TEMP_TRAILER/{s/.* $2=\([^ ]*\).*/\1/p;}" | head -n 1
+}
+
+# Split the matches into "still ours to collapse" and "already published". A temp commit that
+# is reachable from a remote-tracking branch is somebody's permanent history by now (pushed by
+# mistake, or merged upstream by a colleague); collapsing it would rewrite published history,
+# so it is reported but never blocks future runs.
+temp_commits_local() {
+  temp_commits | while IFS= read -r line; do
+    sha=${line%% *}
+    [ -n "$(git for-each-ref --contains "$sha" --format='%(refname)' refs/remotes/ 2>/dev/null | head -n 1)" ] && continue
+    printf '%s\n' "$line"
+  done
+}
+temp_commits_published() {
+  temp_commits | while IFS= read -r line; do
+    sha=${line%% *}
+    [ -n "$(git for-each-ref --contains "$sha" --format='%(refname)' refs/remotes/ 2>/dev/null | head -n 1)" ] || continue
+    printf '%s\n' "$line"
+  done
+}
+
+# Re-stage the paths that were staged before the run (content taken from the merged worktree).
+restore_staging_file() { # $1 = NUL-separated list of paths
+  [ -n "${1:-}" ] && [ -s "$1" ] || return 0
+  local -a paths=()
+  local p
+  while IFS= read -r -d '' p; do paths+=("$p"); done < "$1"
+  [ "${#paths[@]}" -gt 0 ] || return 0
+  $GIT add -A -- "${paths[@]}" || warn "failed to restore the staged state of ${#paths[@]} file(s)"
+}
+latest_staged_file() { ls -t "$gdir"/pullkeep-staged-* 2>/dev/null | head -n 1; }
+
+# Keep only the newest $KEEP backups (snapshot ref plus its metadata file).
+prune_backups() {
+  local n=0 r
+  git for-each-ref --sort=-committerdate --format='%(refname)' refs/pullkeep/ 2>/dev/null \
+    | while IFS= read -r r; do
+        [ -n "$r" ] || continue
+        n=$((n+1))
+        if [ "$n" -gt "$KEEP" ]; then
+          git update-ref -d "$r" && rm -f "$meta_dir/${r#refs/pullkeep/}"
+        fi
+      done
+  true
+}
+
+# ------------------------------------------------------------------ concurrency lock
+# One mutating run at a time. mkdir is atomic on every platform bash runs on, so no flock(1)
+# is needed; the lock lives inside the git dir, so separate clones never contend. Read-only
+# modes (--dry-run, --check) do not take it, they never write.
+lock_dir="$common_dir/pullkeep.lock"
+LOCKED=0
+release_lock() {
+  [ "$LOCKED" -eq 1 ] && [ -n "${gdir:-}" ] && rm -rf "$lock_dir" 2>/dev/null
+  true
+}
+trap 'release_lock' EXIT
+trap 'exit 130' INT TERM
+host_name() { hostname 2>/dev/null || uname -n 2>/dev/null || echo unknown; }
+
+acquire_lock() {
+  local waited=0 owner o_pid o_host o_stamp me
+  me=$(host_name)
+  while :; do
+    if mkdir "$lock_dir" 2>/dev/null; then
+      printf '%s %s %s\n' "$$" "$me" "$(date +%Y%m%d-%H%M%S)" >"$lock_dir/owner" 2>/dev/null
+      LOCKED=1
+      return 0
+    fi
+    owner=$(cat "$lock_dir/owner" 2>/dev/null) || owner=""
+    if [ -n "$owner" ]; then
+      o_pid=${owner%% *}; owner=${owner#* }
+      o_host=${owner%% *}; o_stamp=${owner#* }
+      if [ "$o_host" = "$me" ] && [ -n "$o_pid" ] && ! kill -0 "$o_pid" 2>/dev/null; then
+        warn "removed a stale lock left by dead pid $o_pid (started $o_stamp)"
+        rm -rf "$lock_dir"; continue
+      fi
+      err "another pullkeep run is already working in this repository:"
+      err "  pid $o_pid on $o_host since $o_stamp"
+      err "wait for it to finish; if you are sure it is gone, delete: $lock_dir"
+      exit 35
+    fi
+    waited=$((waited+1))
+    if [ "$waited" -ge 3 ]; then
+      warn "removed a lock left behind by a crashed run (no owner file): $lock_dir"
+      rm -rf "$lock_dir"; continue
+    fi
+    sleep 1
+  done
+}
+
+case "$MODE" in
+  run|finish|recover|undo) acquire_lock ;;
+esac
+
+# ------------------------------------------------------------------ --undo / --abort
+if [ "$MODE" = "undo" ]; then
+  ref=$(newest_backup)
+  [ -n "$ref" ] || die "no refs/pullkeep/* backup found; nothing to undo" 30
+  stamp=${ref#refs/pullkeep/}
+  meta="$meta_dir/$stamp"
+  base=$(git rev-parse "$ref^" 2>/dev/null) || die "backup ref $ref has no parent" 40
+
+  if [ "$YES" -ne 1 ] && [ ! -t 0 ]; then
+    die "--undo rewrites the working tree and discards commits made after the run; re-run with -y in a non-interactive shell" 2
+  fi
+  if [ "$YES" -ne 1 ]; then
+    printf '%s: about to reset the working tree to %s and move the branch back to %s.\n' \
+      "$PROG" "$stamp" "$(git rev-parse --short "$base")" >&2
+    printf 'commits made after pullkeep will be lost. continue? [y/N] ' >&2
+    read -r reply || reply=""
+    case "$reply" in y|Y|yes|YES) ;; *) say "aborted."; exit 0 ;; esac
+  fi
+
+  # Abort any unfinished merge/rebase first, otherwise reset is refused or leaves junk.
+  for d in rebase-merge rebase-apply; do
+    if [ -d "$gdir/$d" ]; then
+      say "==> aborting unfinished rebase first"
+      git rebase --abort || die "git rebase --abort failed" 40
+      break
+    fi
+  done
+  if [ -e "$gdir/MERGE_HEAD" ]; then
+    say "==> aborting unfinished merge first"
+    git merge --abort || die "git merge --abort failed" 40
+  fi
+
+  say "==> HEAD $(git rev-parse --short HEAD) -> $(git rev-parse --short "$base")"
+  git reset --hard "$ref"  || die "reset --hard failed" 40
+  git reset --mixed "$base" || die "reset --mixed failed" 40
+
+  # Restore the index (staged state) exactly: read-tree touches the index only.
+  idx_tree=$(sed -n 's/^idx_tree=//p' "$meta" 2>/dev/null)
+  if [ -n "$idx_tree" ] && git rev-parse --verify -q "$idx_tree" >/dev/null; then
+    git read-tree "$idx_tree" || warn "could not restore the staged state"
+  fi
+
+  # Move parked untracked files back; keep them in the backup dir if upstream owns the path now.
+  aside="$gdir/pullkeep-aside/$stamp"
+  if [ -d "$aside" ]; then
+    while IFS= read -r -d '' f; do
+      rel=${f#"$aside"/}
+      if [ -e "$rel" ]; then
+        say "kept aside (path now owned by upstream): $rel"
+      else
+        mkdir -p "$(dirname "$rel")"
+        mv "$f" "$rel" && say "restored: $rel"
+      fi
+    done < <(find "$aside" -type f -print0)
+    find "$aside" -depth -type d -empty -exec rmdir {} + 2>/dev/null
+  fi
+
+  git update-ref -d "$ref" || die "failed to delete $ref" 40
+  rm -f "$meta"
+  say "done. back on $(git rev-parse --short "$base") with your uncommitted changes restored."
+  exit 0
+fi
+
+# ------------------------------------------------------------------ --recover
+# Collapse a temp commit that survived an interrupted run. Deliberately conservative: it only
+# acts when the target is unambiguous, otherwise it explains what to do and exits non-zero.
+if [ "$MODE" = "recover" ]; then
+  for f in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD rebase-merge rebase-apply; do
+    [ -e "$gdir/$f" ] \
+      && die "cannot recover while a merge/rebase is in progress ($f): finish it with 'git pullkeep --continue', or roll back with 'git pullkeep --undo -y'" 31
+  done
+
+  left=$(temp_commits_local | head -n 1)
+  if [ -z "$left" ]; then
+    if [ -n "$(temp_commits_published)" ]; then
+      say "nothing to recover: the only \"$TEMP_MARK\" commit(s) found are already published;"
+      say "collapsing them would rewrite published history, so pullkeep leaves them alone."
+    else
+      say "nothing to recover: no \"$TEMP_MARK\" commit in the last $SCAN commits of HEAD."
+    fi
+    exit 0
+  fi
+  tmp_sha=${left%% *}
+  tmp_sub=${left#* }
+  tmp_base=$(temp_field "$tmp_sha" base)
+  head_sha=$(git rev-parse HEAD)
+  cur_branch=$(git symbolic-ref --short -q HEAD) || cur_branch=""
+
+  target=""; reason=""
+  cand=$(git rev-parse '@{upstream}' 2>/dev/null) || cand=""
+  if [ -n "$cand" ] && [ "$cand" != "$tmp_sha" ] && git merge-base --is-ancestor "$cand" HEAD; then
+    target=$cand; reason="upstream tip merged into HEAD"
+  elif [ -n "$REMOTE" ] && [ -n "${BRANCH:-$cur_branch}" ]; then
+    cand=$(git rev-parse "refs/remotes/$REMOTE/${BRANCH:-$cur_branch}" 2>/dev/null) || cand=""
+    if [ -n "$cand" ] && [ "$cand" != "$tmp_sha" ] && git merge-base --is-ancestor "$cand" HEAD; then
+      target=$cand; reason="$REMOTE/${BRANCH:-$cur_branch} merged into HEAD"
+    fi
+  fi
+  if [ -z "$target" ] && [ "$head_sha" = "$tmp_sha" ]; then
+    target=$(git rev-parse "$tmp_sha^") || die "cannot resolve the parent of $tmp_sha" 40
+    reason="parent of the temp commit (the pull never completed)"
+  fi
+  if [ -z "$target" ]; then
+    err "found a temporary commit that cannot be collapsed automatically:"
+    err "  ${tmp_sha:0:12} $tmp_sub"
+    err "the upstream tip is not merged into HEAD, so guessing a target could lose upstream work."
+    err "merge upstream yourself, then 'git pullkeep --continue'; or 'git pullkeep --undo -y' to roll back."
+    exit 20
+  fi
+
+  pub=$(git for-each-ref --contains "$tmp_sha" --format='%(refname:short)' refs/remotes/ 2>/dev/null | head -n 1)
+  [ -n "$pub" ] && warn "the temp commit is already part of $pub: collapsing rewrites published history (push with --force-with-lease if that is intended)"
+
+  say "==> found temp commit ${tmp_sha:0:12} (\"$tmp_sub\")"
+  [ -n "$tmp_base" ] && say "    created on ${tmp_base:0:12}"
+  say "==> collapsing to uncommitted changes: reset --mixed $(git rev-parse --short "$target") ($reason)"
+  git reset --mixed "$target" || die "reset --mixed failed" 40
+  restore_staging_file "$(latest_staged_file)"
+  if [ -n "$(temp_commits_local)" ]; then
+    warn "another local temporary commit is still in the last $SCAN commits; inspect with: git log --oneline -$SCAN"
+    exit 20
+  fi
+  say "done. the parked changes are back as uncommitted modifications on $(git rev-parse --short "$target")."
+  exit 0
+fi
+
+# ------------------------------------------------------------------ common pre-checks
+for f in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD rebase-merge rebase-apply; do
+  [ -e "$gdir/$f" ] \
+    && die "unfinished merge/rebase state ($f): resolve it and run 'git pullkeep --continue', or roll back with 'git pullkeep --undo -y'" 31
+done
+
+# Idempotency guard: never start a new run on top of a temp commit from an earlier run.
+# Running again would stack a second temp commit and make the first one permanent.
+if [ "$MODE" != "finish" ]; then
+  leftovers=$(temp_commits_local)
+  if [ -n "$leftovers" ]; then
+    err "a temporary commit from an earlier run is still in your history:"
+    printf '%s\n' "$leftovers" | while IFS= read -r l; do err "  $l"; done
+    err "the pull never reached the collapse step, so those changes are committed right now."
+    err "finish it  : git pullkeep --continue   (upstream merged, conflicts resolved)"
+    err "or collapse: git pullkeep --recover    (detects the target automatically)"
+    err "or roll back: git pullkeep --undo -y"
+    exit 31
+  fi
+  published=$(temp_commits_published)
+  if [ -n "$published" ]; then
+    warn "$(printf '%s\n' "$published" | wc -l | tr -d ' ') temporary commit(s) found in the last $SCAN are already published;"
+    warn "they are permanent history now, so pullkeep will not touch them (no action needed)."
+  fi
+fi
+
+branch=$(git symbolic-ref --short -q HEAD) || die "detached HEAD; check out a branch first" 30
+
+if [ -n "$REMOTE" ]; then
+  git config --get "remote.$REMOTE.url" >/dev/null 2>&1 \
+    || die "positional argument '$REMOTE' is not a configured remote name" 30
+  [ -n "$BRANCH" ] || BRANCH="$branch"
+  upstream="$REMOTE/$BRANCH"
+  up_ref="refs/remotes/$upstream"
+  up_ref_arg="$upstream"
+else
+  upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null) \
+    || die "branch $branch has no upstream; run: git branch -u origin/$branch" 30
+  up_ref_arg='@{upstream}'
+  REMOTE=${upstream%%/*}
+  BRANCH=${upstream#*/}
+  up_ref=$(git rev-parse --symbolic-full-name '@{upstream}')
+fi
+
+# The collapse step needs a resolvable "upstream tip", so always pin the strategy
+# explicitly instead of relying on pull.rebase in the user's config.
+if [ "$STRATEGY" = "rebase" ]; then
+  pull_args+=("${REBASE_OPT:---rebase}")
+else
+  pull_args+=(--no-rebase)
+fi
+[ -n "$REMOTE" ] && pull_args+=("$REMOTE")
+[ -n "$BRANCH" ] && pull_args+=("$BRANCH")
+
+# ------------------------------------------------------------------ --continue / --finish
+if [ "$MODE" = "finish" ]; then
+  new_up=$(git rev-parse "$up_ref" 2>/dev/null) || die "cannot resolve $upstream" 30
+  git merge-base --is-ancestor "$new_up" HEAD \
+    || die "upstream $upstream ($(git rev-parse --short "$new_up")) is not merged into HEAD yet; resolve and commit first, or run: git pullkeep --recover" 20
+  say "collapsing temp/merge commits back to uncommitted changes (target: $upstream)"
+  git reset --mixed "$new_up" || die "reset --mixed failed" 40
+  restore_staging_file "$(latest_staged_file)"
+  if [ -n "$(temp_commits_local)" ]; then
+    warn "a temporary commit is still in the last $SCAN commits; inspect with: git log --oneline -$SCAN"
+  fi
+  say "done. your local changes are back as uncommitted modifications on top of $upstream."
+  exit 0
+fi
+
+# ------------------------------------------------------------------ fetch
+if [ "$NOFETCH" -eq 1 ]; then
+  say "==> fetch skipped (--no-fetch)"
+else
+  say "==> fetch $REMOTE ${fetch_args[*]:-}"
+  git fetch ${fetch_args[@]+"${fetch_args[@]}"} "$REMOTE" ${BRANCH:+"$BRANCH"} && fetch_ok=1 || fetch_ok=0
+  [ "$fetch_ok" -eq 1 ] \
+    || die "fetch failed: the remote could not be read (network, credentials, or a ref locked by another process). Nothing was changed; retry, or analyse the current tracking ref with --no-fetch" 30
+fi
+
+up_sha=$(git rev-parse "$up_ref" 2>/dev/null) || die "cannot resolve $upstream (try without --no-fetch)" 30
+behind=$(git rev-list --count "HEAD..$up_sha")
+if [ "$behind" -eq 0 ]; then
+  say "already up to date with $upstream ($(git rev-parse --short "$up_sha")). nothing to do; local changes untouched."
+  exit 0
+fi
+base=$(git merge-base HEAD "$up_sha") || die "no common ancestor with $upstream" 30
+old_head=$(git rev-parse HEAD)   # pre-pull HEAD: the parent of the temp commit
+
+# ------------------------------------------------------------------ overlap analysis
+names_z() { $GIT "$@" --name-only -z 2>/dev/null; }
+
+declare -a incoming=() dirty=() added=() untracked=()
+while IFS= read -r -d '' p; do incoming+=("$p");  done < <(names_z diff "$base" "$up_sha")
+while IFS= read -r -d '' p; do dirty+=("$p");     done < <(names_z diff HEAD)
+while IFS= read -r -d '' p; do added+=("$p");     done < <(names_z diff --diff-filter=A "$base" "$up_sha")
+while IFS= read -r -d '' p; do untracked+=("$p"); done < <($GIT ls-files --others --exclude-standard -z)
+
+contains() { # contains <needle> <haystack...>
+  local n="$1"; shift
+  local x
+  for x in "$@"; do [ "$x" = "$n" ] && return 0; done
+  return 1
+}
+
+declare -a blocking=() collide=() moddel=()
+for p in "${incoming[@]:-}"; do
+  [ -n "$p" ] || continue
+  contains "$p" "${dirty[@]:-}"     && blocking+=("$p")
+  contains "$p" "${untracked[@]:-}" && collide+=("$p")
+done
+# Local deletion + upstream modification = modify/delete conflict: cannot be merged
+# automatically, a human has to decide.
+for p in "${blocking[@]:-}"; do
+  [ -n "$p" ] || continue
+  if [ ! -e "$p" ] && git cat-file -e "HEAD:$p" 2>/dev/null; then moddel+=("$p"); fi
+done
+
+say ""
+say "branch      : $branch"
+say "upstream    : $upstream ($(git rev-parse --short "$up_sha"))"
+say "incoming    : ${#incoming[@]} file(s) across $behind new commit(s)"
+say "dirty       : ${#dirty[@]} tracked file(s) + ${#untracked[@]} untracked"
+say "strategy    : $STRATEGY"
+# rebase requires a clean tree, so in rebase mode every dirty tracked file has to move aside.
+if [ "$STRATEGY" = "rebase" ]; then
+  declare -a park=("${dirty[@]:-}")
+else
+  declare -a park=("${blocking[@]:-}")
+fi
+# A non-fast-forward merge refuses to start while any index entry differs from HEAD
+# ("Your local changes ... would be overwritten by merge"), even for paths the merge never
+# touches. Staged entries therefore block the pull exactly like overlapping edits: park them
+# too (merge strategy only; rebase already parks every dirty file, staged ones included).
+declare -a staged_extra=()
+if [ "$STRATEGY" != "rebase" ]; then
+  while IFS= read -r -d '' p; do
+    [ -n "$p" ] || continue
+    contains "$p" "${park[@]:-}" || { park+=("$p"); staged_extra+=("$p"); }
+  done < <(names_z diff --cached)
+fi
+declare -a park_real=()
+for p in "${park[@]:-}"; do [ -n "$p" ] && park_real+=("$p"); done
+say "blocking    : ${#blocking[@]} file(s) overlap upstream, ${#park_real[@]} file(s) will be parked"
+for p in "${park_real[@]:-}"; do say "   - $p"; done
+for p in "${staged_extra[@]:-}"; do
+  say "   + $p (staged entry: a merge refuses to run while the index differs from HEAD, so it parks too)"
+done
+if [ "${#collide[@]}" -gt 0 ]; then
+  say "WARNING: ${#collide[@]} untracked file(s) collide with incoming new files:"
+  for p in "${collide[@]}"; do say "   ! $p"; done
+  say "         they will be moved to .git/pullkeep-aside/<stamp>/ and restored by --undo"
+fi
+if [ "${#moddel[@]}" -gt 0 ]; then
+  say "WARNING: ${#moddel[@]} file(s) are deleted locally but modified upstream -> modify/delete conflict:"
+  for p in "${moddel[@]}"; do say "   ! $p"; done
+  say "         resolve with 'git rm <file>' (keep your deletion) or 'git add <file>' (take upstream)"
+fi
+say ""
+
+if [ "$MODE" = "check" ]; then
+  if [ "${#park_real[@]}" -gt 0 ] || [ "${#collide[@]}" -gt 0 ] || [ "${#moddel[@]}" -gt 0 ]; then
+    say "check: the pull would have to park or resolve files (exit 10)."
+    exit 10
+  fi
+  say "check: a plain pull can proceed (exit 0)."
+  exit 0
+fi
+
+if [ "$MODE" = "dry" ]; then
+  say "dry-run: nothing changed."
+  exit 0
+fi
+
+# ------------------------------------------------------------------ backup snapshot
+# The snapshot and the temp commit are both commit objects, so git needs a committer identity.
+# Checked here, not earlier: --dry-run and --check stay usable on machines without one.
+if [ "${#dirty[@]}" -gt 0 ] || [ "${#collide[@]}" -gt 0 ]; then
+  git var GIT_COMMITTER_IDENT >/dev/null 2>&1 \
+    || die "cannot create commits: user.name / user.email are not configured. set them with: git config user.name \"Your Name\" && git config user.email you@example.com" 30
+fi
+
+stamp=$(date +%Y%m%d-%H%M%S)
+backup_ref="refs/pullkeep/$stamp"
+meta="$meta_dir/$stamp"
+aside="$gdir/pullkeep-aside/$stamp"
+
+if [ "${#dirty[@]}" -gt 0 ] || [ "${#collide[@]}" -gt 0 ]; then
+  say "==> snapshot of current working tree -> $backup_ref"
+  snap_index="$gdir/pullkeep-snapshot-index"
+  rm -f "$snap_index"
+  GIT_INDEX_FILE="$snap_index" git read-tree HEAD || die "read-tree failed" 40
+  GIT_INDEX_FILE="$snap_index" git add -u      || die "snapshot add -u failed" 40
+  # Entries that live only in the index (staged new files) are invisible to `add -u` against
+  # HEAD, but --undo restores the worktree from this snapshot via reset --hard: without them
+  # undo would leave them staged-but-deleted (index A, worktree file gone).
+  while IFS= read -r -d '' p; do
+    GIT_INDEX_FILE="$snap_index" git add -- "$p" || die "snapshot add failed: $p" 40
+  done < <(names_z diff --cached --diff-filter=A)
+  wt_tree=$(GIT_INDEX_FILE="$snap_index" git write-tree) || die "write-tree failed" 40
+  rm -f "$snap_index"
+  wt_snap=$(printf 'pullkeep snapshot\n' | git commit-tree "$wt_tree" -p HEAD) || die "commit-tree failed" 40
+  idx_tree=$(git write-tree 2>/dev/null) || idx_tree=""
+  git update-ref "$backup_ref" "$wt_snap" || die "failed to create $backup_ref" 40
+  mkdir -p "$meta_dir"
+  printf 'idx_tree=%s\nstrategy=%s\nstamp=%s\nup_sha=%s\nbase=%s\n' \
+    "$idx_tree" "$STRATEGY" "$stamp" "$up_sha" "$old_head" > "$meta"
+  say "    'git pullkeep --undo' restores this exact dirty state at any time"
+  prune_backups
+fi
+
+# ------------------------------------------------------------------ untracked collisions
+if [ "${#collide[@]}" -gt 0 ]; then
+  mkdir -p "$aside"
+  for p in "${collide[@]}"; do
+    mkdir -p "$aside/$(dirname "$p")"
+    mv "$p" "$aside/$p" || die "failed to move aside: $p" 40
+    say "moved aside: $p"
+  done
+  say "NOTE: upstream now owns these paths; your versions are kept under $aside"
+fi
+
+# ------------------------------------------------------------------ nothing to park
+if [ "${#park_real[@]}" -eq 0 ]; then
+  say "==> no overlapping files, plain: git pull ${pull_args[*]}"
+  git pull "${pull_args[@]}" || die "pull failed; local changes untouched" 20
+  say "done. local changes untouched."
+  exit 0
+fi
+
+# ------------------------------------------------------------------ staged state + park
+staged_file="$gdir/pullkeep-staged-$stamp"
+$GIT diff --cached --name-only -z --diff-filter=ACDMRT >"$staged_file" 2>/dev/null
+restore_staging() { restore_staging_file "$staged_file"; }
+
+status_pre="$gdir/pullkeep-status-pre"
+$GIT status --porcelain >"$status_pre" 2>/dev/null
+
+# Feeding a path that was already removed from the index (the user ran git rm) to git add
+# fails with "pathspec did not match any files". Its deletion is already recorded in the
+# index, so skip it here and let commit --only below pick it up.
+declare -a addable=()
+for p in "${park_real[@]}"; do
+  [ -n "$p" ] || continue
+  if [ -e "$p" ] || $GIT ls-files --error-unmatch -- "$p" >/dev/null 2>&1; then
+    addable+=("$p")
+  fi
+done
+if [ "${#addable[@]}" -gt 0 ]; then
+  $GIT add -A -- "${addable[@]}" || die "git add failed on ${#addable[@]} file(s)" 40
+fi
+temp_msg="$TEMP_MARK (${#park_real[@]} file(s))"
+temp_trailer="$TEMP_TRAILER stamp=$stamp base=$old_head upstream=$up_sha strategy=$STRATEGY"
+if ! $GIT commit --only -q -m "$temp_msg" -m "$temp_trailer" -- "${park_real[@]}"; then
+  die "temp commit failed; nothing was pulled. backup ref still at $backup_ref" 40
+fi
+say "==> temp commit: $(git rev-parse --short HEAD) (${#park_real[@]} file(s))"
+say "    tagged \"$TEMP_MARK\" so a later run can detect and collapse it"
+
+say "==> git pull ${pull_args[*]}"
+if ! git pull "${pull_args[@]}"; then
+  if [ "$STRATEGY" = "rebase" ]; then
+    err "rebase did not complete (see conflicts above)."
+    err "resolve them, then: git add <files> && git rebase --continue && git pullkeep --continue"
+    err "to bail out entirely: git rebase --abort && git pullkeep --undo -y"
+  else
+    err "merge did not complete (see conflicts above)."
+    err "resolve them, then: git add <files> && git commit && git pullkeep --continue"
+    err "if you commit the merge yourself, still run: git pullkeep --continue (or --recover)"
+    err "to bail out entirely: git merge --abort && git pullkeep --undo -y"
+  fi
+  exit 20
+fi
+
+new_up=$(git rev-parse "$up_ref" 2>/dev/null) || new_up=$(git rev-parse "$up_ref_arg" 2>/dev/null) \
+  || die "cannot resolve the new upstream tip" 40
+say "==> collapsing commits: reset --mixed $(git rev-parse --short "$new_up")"
+git reset --mixed "$new_up" || die "reset --mixed failed (backup ref: $backup_ref)" 40
+restore_staging
+
+# ------------------------------------------------------------------ verification
+status_post="$gdir/pullkeep-status-post"
+$GIT status --porcelain >"$status_post" 2>/dev/null
+if diff -u "$status_pre" "$status_post" >"$gdir/pullkeep-status-diff" 2>&1; then
+  say "==> verified: working tree state is identical to pre-pull ($(wc -l <"$status_post" | tr -d ' ') entries)"
+else
+  say "==> NOTE: working tree entries changed (expected when upstream added/deleted tracked files):"
+  sed -n '1,40p' "$gdir/pullkeep-status-diff" | sed 's/^/    /'
+fi
+rm -f "$status_pre" "$status_post" "$gdir/pullkeep-status-diff" "$staged_file"
+
+# Last line of defence: if a temp commit somehow survived, say so instead of staying silent.
+if [ -n "$(temp_commits_local)" ]; then
+  warn "a temporary commit is still reachable from HEAD; run: git pullkeep --recover"
+fi
+
+say ""
+say "done. on $upstream ($(git rev-parse --short "$up_sha")), ${#dirty[@]} dirty file(s) still uncommitted."
+say "  undo fully : git pullkeep --undo"
+say "  backups    : $(git for-each-ref --format='%(refname:short)' refs/pullkeep/ | wc -l | tr -d ' ') ref(s) under refs/pullkeep/"

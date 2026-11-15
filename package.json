@@ -1,0 +1,47 @@
+{
+  "name": "git-pullkeep",
+  "version": "0.1.1",
+  "description": "git pull that keeps every uncommitted change: only the blocking files are parked in a temporary commit, then collapsed back. No stash.",
+  "keywords": [
+    "git",
+    "pull",
+    "stash",
+    "autostash",
+    "dirty",
+    "working-tree",
+    "git-extension",
+    "git-subcommand",
+    "wip",
+    "cli"
+  ],
+  "homepage": "https://github.com/aiti-ai/git-pullkeep",
+  "bugs": {
+    "url": "https://github.com/aiti-ai/git-pullkeep/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aiti-ai/git-pullkeep.git"
+  },
+  "license": "MIT",
+  "author": "aiti-ai",
+  "bin": {
+    "git-pullkeep": "./git-pullkeep"
+  },
+  "man": "./man/git-pullkeep.1",
+  "files": [
+    "git-pullkeep",
+    "man/git-pullkeep.1",
+    "README.md",
+    "README_zh.md",
+    "CHANGELOG.md"
+  ],
+  "preferGlobal": true,
+  "engines": {
+    "node": ">=12"
+  },
+  "scripts": {
+    "test": "bash tests/run-tests.sh",
+    "pack:check": "npm pack --dry-run",
+    "prepublishOnly": "bash tests/run-tests.sh"
+  }
+}

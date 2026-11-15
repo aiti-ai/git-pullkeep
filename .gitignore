@@ -1,0 +1,8 @@
+# npm packaging artifacts
+*.tgz
+node_modules/
+pack.log
+package-lock.json
+# --- aiti managed (loose trace) ---
+.aiti-trace/
+# --- end aiti managed (loose trace) ---

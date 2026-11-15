@@ -1,0 +1,139 @@
+.TH GIT-PULLKEEP 1 "2026-11-06" "git-pullkeep 0.1.0" "Git Manual"
+.SH NAME
+git-pullkeep \- pull with uncommitted changes, parking only the files that block it
+.SH SYNOPSIS
+.nf
+\fBgit pullkeep\fR [\fIoptions\fR] [\fI<remote>\fR [\fI<branch>\fR]] [\fIgit-pull options\fR]
+.fi
+.SH DESCRIPTION
+\fBgit pull\fR refuses to run when a locally modified file is also modified upstream.
+\fBgit pullkeep\fR parks only those overlapping files in a temporary commit, runs the pull,
+then collapses the temporary and merge commits again with \fBgit reset --mixed\fR.
+Every other dirty file never leaves the working tree, the index (staged) state is restored,
+and no stash is created. In merge mode, staged entries outside the overlap are parked too:
+git mergeR refuses to start while the index differs from \fBHEAD\fR, so they block the
+pull exactly like overlapping edits. In \fB\-\-rebase\fR mode every dirty tracked file
+(including staged ones) is parked, because rebase itself requires a clean tree.
+.PP
+A snapshot of the pre-pull working tree is stored under
+\fBrefs/pullkeep/<stamp>\fR so \fB\-\-undo\fR can restore it exactly.
+Untracked files whose path is claimed by upstream are moved to
+\fB.git/pullkeep-aside/<stamp>/\fR and restored by \fB\-\-undo\fR.
+.SH OPTIONS
+.TP
+\fB\-\-dry-run\fR
+Analyse and report only: no working-tree, index or history change. The pre-flight fetch still
+runs unless \fB\-\-no-fetch\fR is given.
+.TP
+\fB\-\-check\fR
+Exit 10 if the pull would have to park or resolve files, 0 otherwise. Intended for CI.
+.TP
+\fB\-\-continue\fR, \fB\-\-finish\fR
+After conflicts were resolved and committed (merge) or after \fBgit rebase \-\-continue\fR,
+collapse the temporary/merge commits back into uncommitted changes.
+.TP
+\fB\-\-abort\fR, \fB\-\-undo\fR
+Restore the working tree, index and branch from the most recent snapshot.
+Commits created after the run are discarded. Requires confirmation; use \fB\-y\fR when
+stdin is not a terminal.
+.TP
+\fB\-\-recover\fR
+Collapse a temporary commit left behind by an interrupted run (conflicts, killed shell).
+The target is only chosen when it is unambiguous: the upstream tip if it is already merged
+into \fBHEAD\fR, otherwise the parent of the temporary commit. Otherwise the command exits
+with status 20 and prints instructions. Does nothing (status 0) when no temporary commit is
+there.
+.TP
+\fB\-y\fR, \fB\-\-yes\fR
+Do not ask for confirmation.
+.TP
+\fB\-\-no-fetch\fR
+Skip the pre-flight fetch and analyse against the current remote-tracking ref.
+.TP
+\fB\-\-keep-backups=\fIN\fR
+Keep the \fIN\fR most recent snapshots under \fBrefs/pullkeep/\fR (default 5).
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show usage. Note that \fBgit pullkeep \-\-help\fR is intercepted by git itself and looks for
+this man page, which is why \fB\-h\fR is the reliable form.
+.TP
+\fB\-\-version\fR
+Print the version.
+.SH RELAYED GIT-PULL OPTIONS
+\fB\-\-rebase\fR[=\fImerges\fR], \fB\-r\fR, \fB\-\-no-rebase\fR,
+\fB\-\-no-ff\fR, \fB\-\-ff\fR, \fB\-X\fR \fIoption\fR, \fB\-s\fR \fIstrategy\fR,
+\fB\-\-no-edit\fR, \fB\-\-edit\fR, \fB\-\-signoff\fR, \fB\-\-stat\fR, \fB\-\-no-stat\fR,
+\fB\-\-summary\fR, \fB\-\-quiet\fR, \fB\-\-verbose\fR, \fB\-\-progress\fR,
+\fB\-\-prune\fR, \fB\-p\fR, \fB\-\-tags\fR, \fB\-\-no-tags\fR, \fB\-\-all\fR,
+\fB\-\-force\fR, \fB\-\-depth=\fIN\fR, \fB\-\-deepen=\fIN\fR, \fB\-\-jobs=\fIN\fR.
+.PP
+Because rebase requires a clean tree, \fB\-\-rebase\fR parks \fIall\fR dirty tracked files
+instead of only the overlapping ones; they are restored after the pull.
+.SH REJECTED OPTIONS
+\fB\-\-ff-only\fR (parking files requires a local commit, so the update cannot be a
+fast-forward), \fB\-\-squash\fR and \fB\-\-no-commit\fR (no commit layer to collapse),
+\fB\-\-allow-unrelated-histories\fR (no merge base, so no overlap analysis),
+\fB\-\-rebase=interactive\fR (needs a terminal). These exit with status 21.
+.SH EXIT STATUS
+.TP
+0
+Success, or already up to date.
+.TP
+2
+Bad command line: unknown option, missing value, or \fB\-\-undo\fR without \fB\-y\fR when
+stdin is not a terminal.
+.TP
+10
+\fB\-\-check\fR found files that would have to be parked or resolved.
+.TP
+20
+The run stopped and needs a human: merge/rebase conflicts, or \fBgit pull\fR itself failed.
+Your local changes are still intact; use \fB\-\-continue\fR, \fB\-\-recover\fR or
+\fB\-\-undo\fR.
+.TP
+21
+Rejected option combination.
+.TP
+30
+Repository or environment problem: not a repo, detached HEAD, no upstream, the fetch
+failed, \fBuser.name\fR/\fBuser.email\fR are not configured, or there is no snapshot to undo.
+.TP
+31
+An unfinished merge, rebase, cherry-pick or revert is in progress, or a temporary commit
+from an earlier run is still reachable from \fBHEAD\fR (run \fB\-\-continue\fR,
+\fB\-\-recover\fR or \fB\-\-undo\fR).
+.TP
+35
+The repository is locked: another pullkeep run is already writing to it. Wait for that run;
+if you are sure it is gone, delete \fB\$GIT_COMMON_DIR/pullkeep.lock\fR.
+.TP
+40
+Internal error; a snapshot ref that was already created is preserved for \fB\-\-undo\fR.
+.SH EXAMPLES
+.nf
+git pullkeep                       # merge, keep everything uncommitted
+git pullkeep \-\-rebase              # rebase, park all dirty files
+git pullkeep \-\-dry-run             # what would happen?
+git pullkeep \-\-check; echo $?       # 0 = plain pull is enough
+git pullkeep origin main           # explicit remote and branch
+git pullkeep \-\-continue            # after resolving conflicts
+git pullkeep \-\-recover             # collapse a temp commit from a dead run
+git pullkeep \-\-undo \-y             # exact rollback
+.fi
+.SH SAFETY
+Temporary commits are labelled \fBwip: pullkeep temp commit\fR and carry a
+\fBpullkeep-temp:\fR trailer (stamp, base, upstream, strategy); the same facts are stored in
+\fB\$GIT_DIR/pullkeep-meta/\fR. Before doing anything, the command scans the last 50 commits
+reachable from \fBHEAD\fR (override with \fBPULLKEEP_SCAN\fR) and refuses with status 31 if it
+finds one, so a second run can never stack on top of the first. Consequently a run that is
+repeated on an up-to-date branch is a no-op, and an interrupted run never turns the marker
+commit into permanent history.
+.PP
+Only one writing run is allowed per repository: \fBrun\fR, \fB\-\-continue\fR,
+\fB\-\-recover\fR and \fB\-\-undo\fR take a lock in the common git dir (a \fBmkdir\fR, so no
+\fBflock\fR(1) is needed, and linked worktrees of the same repository share it). A lock left
+by a dead process is reclaimed. \fB\-\-dry-run\fR and \fB\-\-check\fR never take it.
+.SH SEE ALSO
+\fBgit-pull\fR(1), \fBgit-stash\fR(1), \fBgit-reset\fR(1), \fBgit-merge\fR(1), \fBgit-rebase\fR(1)
+.SH LICENSE
+MIT

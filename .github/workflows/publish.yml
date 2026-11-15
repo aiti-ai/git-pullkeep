@@ -1,0 +1,102 @@
+name: publish
+
+# A tag is the only thing that can publish. Everything that could make a release wrong is
+# checked before the registry is touched, so a bad tag fails loudly instead of shipping.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: versions must agree (script == package.json == tag)
+        run: |
+          set -eu
+          script=$(sed -n 's/^VERSION=//p' git-pullkeep | head -n 1)
+          pkg=$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' package.json | head -n 1)
+          echo "script    = $script"
+          echo "package   = $pkg"
+          echo "ref type  = ${GITHUB_REF_TYPE:-unknown} (${GITHUB_REF_NAME:-})"
+          if [ "$script" != "$pkg" ]; then
+            echo "::error::VERSION in git-pullkeep ($script) != package.json ($pkg)"
+            exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "v$pkg" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match version $pkg (expected v$pkg)"
+            exit 1
+          fi
+
+      - name: the OWNER placeholder must be replaced before publishing
+        run: |
+          if grep -q 'OWNER/git-pullkeep' package.json; then
+            echo "::error::package.json still contains OWNER - set repository/homepage/bugs/author first"
+            exit 1
+          fi
+
+      - name: test suite
+        run: bash tests/run-tests.sh
+
+      - name: shellcheck (errors only)
+        run: shellcheck -S error git-pullkeep tests/run-tests.sh install.sh
+
+      - name: what the tarball will contain
+        run: npm pack --dry-run 2>&1 | tee pack.log
+
+      - name: the tarball must stay small and complete
+        run: |
+          set -eu
+          grep -q 'git-pullkeep$' pack.log
+          grep -q 'git-pullkeep.1' pack.log
+          if grep -q 'tests/' pack.log; then
+            echo "::error::tests/ leaked into the tarball"
+            exit 1
+          fi
+
+  publish:
+    name: npm publish
+    needs: verify
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm provenance (signed by the CI identity, not just a token)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - name: publish
+        run: npm publish --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  release:
+    name: github release
+    needs: publish
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: attach the script and the man page
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          tag="$GITHUB_REF_NAME"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag already exists, leaving it alone"
+            exit 0
+          fi
+          gh release create "$tag" git-pullkeep man/git-pullkeep.1 \
+            --verify-tag --title "$tag" --generate-notes
