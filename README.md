@@ -124,7 +124,7 @@ consults a registry.
 **Any platform (npm)**
 
 ```sh
-npm install -g git-pullkeep       # from v0.1.1 on; before that use the installers below
+npm install -g git-pullkeep       # from v0.1.2 on; before that use the installers below
 npx git-pullkeep --dry-run        # try it without installing anything
 ```
 

@@ -119,7 +119,7 @@ done. on origin/main (a1b2c3d4), 72 dirty file(s) still uncommitted.
 **全平台（npm）**
 
 ```sh
-npm install -g git-pullkeep       # v0.1.1 起可用；在此之前请用下面的安装脚本
+npm install -g git-pullkeep       # v0.1.2 起可用；在此之前请用下面的安装脚本
 npx git-pullkeep --dry-run        # 不安装也能直接试
 ```
 

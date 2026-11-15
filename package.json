@@ -1,6 +1,6 @@
 {
   "name": "git-pullkeep",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "git pull that keeps every uncommitted change: only the blocking files are parked in a temporary commit, then collapsed back. No stash.",
   "keywords": [
     "git",

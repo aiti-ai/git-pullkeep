@@ -4,6 +4,18 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-11-15
+
+### Fixed
+- The identity preflight now requires an explicitly configured `user.name` plus `user.email`
+  (config, or the `EMAIL` variable). The old `git var GIT_COMMITTER_IDENT` probe behaves
+  differently per platform — some builds happily guess `user@host` on a fully unconfigured
+  machine, which made the same run exit 0 on one OS and 30 on another.
+
+### Changed
+- CI: the bash 3.2 parse check now also covers `tests/run-tests.sh` (GitHub's macOS runner
+  parses the suite with `/bin/bash` 3.2, which rejects constructs newer bashes accept).
+
 ## [0.1.1] - 2026-11-15
 
 ### Fixed
@@ -91,4 +103,6 @@ First public release.
 - npm is only a delivery channel. Git has no plugin registry: a command is discovered purely by
   the `git-<name>` file being on `PATH` (list them with `git help -a`).
 
+[0.1.2]: https://github.com/aiti-ai/git-pullkeep/releases/tag/v0.1.2
+[0.1.1]: https://github.com/aiti-ai/git-pullkeep/releases/tag/v0.1.1
 [0.1.0]: https://github.com/aiti-ai/git-pullkeep/releases/tag/v0.1.0

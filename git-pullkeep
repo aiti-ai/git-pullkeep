@@ -22,7 +22,7 @@
 set -uo pipefail
 
 PROG=git-pullkeep
-VERSION=0.1.1
+VERSION=0.1.2
 GIT="git -c core.quotepath=false"
 
 # Marker written into the temp commit, so leftovers stay detectable without any state file.
@@ -600,8 +600,16 @@ fi
 # ------------------------------------------------------------------ backup snapshot
 # The snapshot and the temp commit are both commit objects, so git needs a committer identity.
 # Checked here, not earlier: --dry-run and --check stay usable on machines without one.
+# git's ident fallback differs per platform (some builds happily guess "user@host" for a
+# fully unconfigured machine, others refuse), so require an explicitly configured identity:
+# user.name must come from config; user.email from config or the EMAIL variable. The outcome
+# is then the same on every OS.
 if [ "${#dirty[@]}" -gt 0 ] || [ "${#collide[@]}" -gt 0 ]; then
-  git var GIT_COMMITTER_IDENT >/dev/null 2>&1 \
+  have_name=false; have_email=false
+  git config user.name   >/dev/null 2>&1 && have_name=true
+  git config user.email  >/dev/null 2>&1 && have_email=true
+  [ -n "${EMAIL:-}" ] && have_email=true
+  $have_name && $have_email \
     || die "cannot create commits: user.name / user.email are not configured. set them with: git config user.name \"Your Name\" && git config user.email you@example.com" 30
 fi
 
