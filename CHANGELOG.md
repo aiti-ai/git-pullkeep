@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2026-11-15
+
+### Added
+- Agent skill: `skills/git-pullkeep/SKILL.md` (Agent Skills open format) so coding agents
+  learn when to reach for `git pullkeep` over `git pull --autostash`, the conflict protocol,
+  and the exit-code action table. Shipped in the npm tarball and discoverable via
+  `npx skills add aiti-ai/git-pullkeep`, `gh skill install`, and the Claude Code plugin
+  marketplace manifest (`.claude-plugin/`) bundled in this repository.
+
 ## [0.1.3] - 2026-11-15
 
 ### Changed

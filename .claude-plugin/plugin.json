@@ -1,0 +1,12 @@
+{
+  "name": "git-pullkeep",
+  "description": "Prefer git pullkeep over git pull / git pull --rebase --autostash whenever a repository carries uncommitted changes: pulls while parking only the blocking files in a labelled temp commit, keeps staged state and untracked files, never touches the other dirty files.",
+  "version": "0.1.4",
+  "author": {
+    "name": "aiti-ai"
+  },
+  "homepage": "https://github.com/aiti-ai/git-pullkeep",
+  "repository": "https://github.com/aiti-ai/git-pullkeep",
+  "license": "MIT",
+  "keywords": ["git", "pull", "autostash", "stash", "sync"]
+}

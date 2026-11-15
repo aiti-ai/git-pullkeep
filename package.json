@@ -1,6 +1,6 @@
 {
   "name": "git-pullkeep",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "git pull that keeps every uncommitted change: only the blocking files are parked in a temporary commit, then collapsed back. No stash.",
   "keywords": [
     "git",
@@ -33,7 +33,8 @@
     "man/git-pullkeep.1",
     "README.md",
     "README_zh.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "skills/git-pullkeep/SKILL.md"
   ],
   "preferGlobal": true,
   "engines": {

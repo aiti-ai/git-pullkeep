@@ -130,6 +130,20 @@ npm install -g git-pullkeep       # from v0.1.3 on; before that use the installe
 npx git-pullkeep --dry-run        # try it without installing anything
 ```
 
+**For AI agents** (Claude Code, Codex, Cursor, OpenCode, pi, …)
+
+```sh
+npx skills add aiti-ai/git-pullkeep          # via the skills.sh registry (vercel-labs)
+gh skill install aiti-ai/git-pullkeep        # via the GitHub CLI
+claude plugin marketplace add aiti-ai/git-pullkeep   # Claude Code plugin marketplace
+claude plugin install git-pullkeep@aiti-ai-git-pullkeep
+```
+
+The skill (`skills/git-pullkeep/SKILL.md`) teaches an agent when to reach for `git pullkeep`
+over `git pull --autostash`, the conflict protocol (`--continue` / `--undo`), the exit-code
+action table, and the install prerequisites. The npm tarball also ships it
+(`skills/git-pullkeep/SKILL.md` in the package) for agents that read node_modules.
+
 **macOS / Linux**
 
 ```sh

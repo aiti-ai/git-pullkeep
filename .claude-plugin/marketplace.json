@@ -1,0 +1,19 @@
+{
+  "name": "aiti-ai-git-pullkeep",
+  "owner": {
+    "name": "aiti-ai"
+  },
+  "metadata": {
+    "description": "Plugin marketplace for the git-pullkeep agent skill",
+    "version": "0.1.4"
+  },
+  "plugins": [
+    {
+      "name": "git-pullkeep",
+      "description": "Prefer git pullkeep over git pull / git pull --rebase --autostash whenever a repository carries uncommitted changes: pulls while parking only the blocking files, keeps staged state and untracked files, never touches the other dirty files.",
+      "source": "./",
+      "category": "git",
+      "keywords": ["git", "pull", "autostash", "stash", "sync", "dirty-worktree"]
+    }
+  ]
+}

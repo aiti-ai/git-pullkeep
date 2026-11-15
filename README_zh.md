@@ -124,6 +124,19 @@ npm install -g git-pullkeep       # v0.1.3 起可用；在此之前请用下面�
 npx git-pullkeep --dry-run        # 不安装也能直接试
 ```
 
+**给 AI agent 用**（Claude Code、Codex、Cursor、OpenCode、pi 等）
+
+```sh
+npx skills add aiti-ai/git-pullkeep                  # skills.sh 注册表（vercel-labs）
+gh skill install aiti-ai/git-pullkeep                # GitHub CLI
+claude plugin marketplace add aiti-ai/git-pullkeep   # Claude Code 插件市场
+claude plugin install git-pullkeep@aiti-ai-git-pullkeep
+```
+
+技能文件（`skills/git-pullkeep/SKILL.md`，Agent Skills 开放格式）教会 agent 何时用
+`git pullkeep` 替代 `git pull --autostash`、冲突协议（`--continue`/`--undo`）、退出码决策表
+与安装前置条件。npm 包内也随包分发该文件。
+
 **macOS / Linux**
 
 ```sh
