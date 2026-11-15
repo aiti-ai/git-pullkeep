@@ -70,3 +70,6 @@ jobs:
       - name: git-pullkeep must parse under bash 3.2 (macOS system bash)
         run: |
           docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash -n ./git-pullkeep
+      - name: the suite itself must parse under bash 3.2
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w bash:3.2 bash -n tests/run-tests.sh

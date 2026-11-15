@@ -22,13 +22,10 @@ check() { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 # suite is written with plain GNU-style `sed -i` on exactly one file per call, so put a
 # tiny wrapper ahead on PATH that emulates that everywhere and leaves no backup behind.
 # The real sed is resolved BEFORE the wrapper dir is prepended and baked in as an absolute
-# path, so the wrapper cannot recurse into itself through PATH.
+# path, so the wrapper cannot recurse into itself through PATH. Written for bash 3.2:
+# no arrays-from-pipeline, no case inside command substitution.
 mkdir -p "$WORKROOT/bin"
-real_sed=$(type -ap sed | while IFS= read -r p; do
-  [ -x "$p" ] || continue
-  case "$p" in "$WORKROOT/bin/sed") continue ;; esac
-  printf '%s\n' "$p"; break
-done)
+real_sed=$(command -v sed)
 cat > "$WORKROOT/bin/sed" <<WRAPPER
 #!/usr/bin/env bash
 if [ "\$1" = "-i" ] && [ \$# -ge 3 ]; then
