@@ -4,6 +4,22 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-11-15
+
+### Changed
+- Aim for drop-in `git pull` compatibility: every option `git pull` accepts is relayed
+  verbatim. Newly recognised and relayed: `--set-upstream`/`-u`, `--verify-signatures`,
+  `--commit`, `--unshallow`, `--update-shallow`, `--negotiation-tip`, `--refmap`,
+  `--submodule-prefix`, `--upload-pack`, `--recurse-submodules[=...]`, `--no-autostash`, and
+  the space-separated forms of `--depth/--deepen/--shallow-since/--shallow-exclude/--jobs`.
+- Options that fight the parking mechanism (`--ff-only`, `--squash`, `--no-commit`, `--all`,
+  `--rebase=interactive`) are no longer refused at parse time: when nothing must be parked
+  they are relayed and `git pull` decides (a clean-tree `git pullkeep --ff-only` now works);
+  they exit 21 only when files would actually be parked.
+- Unrecognised options are relayed with a warning instead of exiting 2, so future `git pull`
+  flags keep working through pullkeep. In a parking run git's own rejection surfaces as exit 20.
+- The "no upstream" hint suggests the positional form when `--set-upstream` was passed.
+
 ## [0.1.2] - 2026-11-15
 
 ### Fixed

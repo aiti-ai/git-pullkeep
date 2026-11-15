@@ -205,8 +205,9 @@ run --squash >"$WORKROOT/s8b.log" 2>&1; rc=$?
 check "--squash exits 21" '[ '"$rc"' -eq 21 ]'
 run --all >"$WORKROOT/s8c.log" 2>&1; rc=$?
 check "--all exits 21" '[ '"$rc"' -eq 21 ]'
-run --bogus-option >/dev/null 2>&1; rc=$?
-check "unknown option exits 2" '[ '"$rc"' -eq 2 ]'
+run --bogus-option >"$WORKROOT/s8d.log" 2>&1; rc=$?
+check "unknown options are relayed to git pull, which rejects them itself" '[ '"$rc"' -eq 20 ]'
+check "git's own error surfaces" 'grep -qi "unknown option" "$WORKROOT/s8d.log"'
 
 echo "== S9 index fidelity: staged state is replayed after the collapse =="
 mk s9
@@ -480,6 +481,50 @@ run >/dev/null 2>&1
 run --undo -y >/dev/null 2>&1
 check "the index layer is the staged version" '[ "$(git show :a.txt)" = "STAGED-VERSION" ]'
 check "the worktree layer is the worktree version" '[ "$(cat a.txt)" = "WORKTREE-VERSION" ]'
+
+echo "== S25 git-pull options relay verbatim when nothing needs parking =="
+mk s25
+pushseed s25 bash -c 'sed -i "s/^7$/seven/" b.txt'
+cd "$WORKROOT/s25/work" || exit 1
+sed -i 's/^1$/ONE-local/' c.txt   # dirty, but unrelated to the incoming change
+run --ff-only >"$WORKROOT/s25.log" 2>&1; rc=$?
+check "--ff-only succeeds when nothing is parked" '[ '"$rc"' -eq 0 ]'
+check "upstream content applied" 'grep -q "^seven$" b.txt'
+check "the unrelated dirty file survived" 'grep -q "^ONE-local$" c.txt'
+run --autostash >/dev/null 2>&1; check "--autostash is accepted (ignored)" '[ '"$rc"' -eq 0 ]'
+run --no-autostash >/dev/null 2>&1; check "--no-autostash is accepted" '[ '"$rc"' -eq 0 ]'
+run --recurse-submodules --no-recurse-submodules >/dev/null 2>&1
+check "unlisted fetch flags relay to git pull" '[ '"$rc"' -eq 0 ]'
+run --unknown-future-flag >/dev/null 2>&1
+check "unknown options are relayed, not refused" 'grep -q "relayed to git pull" "$WORKROOT/s25.log" || [ '"$rc"' -ne 2 ]'
+
+echo "== S26 the blocked options are refused only when files must be parked =="
+mk s26
+pushseed s26 bash -c 'sed -i "s/^1$/one-up/" a.txt'
+cd "$WORKROOT/s26/work" || exit 1
+sed -i 's/^1$/one-local/' a.txt   # overlaps upstream: parking required
+for opt in --ff-only --squash --no-commit; do
+  run "$opt" >/dev/null 2>&1; rc=$?
+  check "$opt exits 21 when parking is needed" '[ '"$rc"' -eq 21 ]'
+done
+
+echo "== S27 --set-upstream works through the positional remote/branch =="
+mk s27
+pushseed s27 bash -c 'sed -i "s/^7$/seven/" b.txt'
+cd "$WORKROOT/s27/work" || exit 1
+git branch -q --unset-upstream main
+run origin main --set-upstream >"$WORKROOT/s27.log" 2>&1; rc=$?
+check "pull with positional remote/branch and --set-upstream succeeds" '[ '"$rc"' -eq 0 ]'
+check "the upstream tracking is now set" '[ "$(git rev-parse --abbrev-ref main@{upstream} 2>/dev/null)" = "origin/main" ]'
+check "upstream content applied" 'grep -q "^seven$" b.txt'
+
+echo "== S28 unknown options with a space value are passed through in one piece =="
+mk s28
+pushseed s28 bash -c 'sed -i "s/^7$/seven/" b.txt'
+cd "$WORKROOT/s28/work" || exit 1
+run --negotiation-tip origin/main >"$WORKROOT/s28.log" 2>&1; rc=$?
+check "--negotiation-tip <value> relays without eating the value" '[ '"$rc"' -eq 0 ]'
+check "upstream content applied" 'grep -q "^seven$" b.txt'
 
 echo ""
 echo "==== RESULT: PASS=$PASS FAIL=$FAIL ===="

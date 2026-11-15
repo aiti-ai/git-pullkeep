@@ -22,7 +22,7 @@
 set -uo pipefail
 
 PROG=git-pullkeep
-VERSION=0.1.2
+VERSION=0.1.3
 GIT="git -c core.quotepath=false"
 
 # Marker written into the temp commit, so leftovers stay detectable without any state file.
@@ -104,6 +104,8 @@ USAGE
 reject() { err "$1"; err "try: ${2:-git pullkeep -h}"; exit 21; }
 
 # ------------------------------------------------------------------ argument parsing
+blocked_opts=()          # options that fight the parking mechanism; refused only if parking is needed
+SET_UPSTREAM=0
 while [ $# -gt 0 ]; do
   a="$1"
   case "$a" in
@@ -117,44 +119,40 @@ while [ $# -gt 0 ]; do
     -y|--yes)                     YES=1 ;;
     --no-fetch)                   NOFETCH=1 ;;
     --keep-backups=*)             KEEP="${a#*=}" ;;
-    --autostash)                  warn "--autostash ignored: pullkeep never uses stash" ;;
-    # ---- rejected combinations
-    --ff-only)
-      reject "--ff-only cannot work with pullkeep: pullkeep commits blocked files locally, so the update is never a fast-forward." \
-             "git pull --ff-only --autostash" ;;
-    --squash)
-      reject "--squash is incompatible: it creates no commit to collapse afterwards." \
-             "git pull --squash  (on a clean tree)" ;;
-    --no-commit)
-      reject "--no-commit is incompatible: pullkeep needs the commit layer to restore your changes." ;;
-    --allow-unrelated-histories)
-      reject "--allow-unrelated-histories is incompatible: without a merge base there is no overlap to analyse." ;;
-    --all)
-      reject "--all cannot be relayed: 'git fetch --all' rejects explicit refspecs, and pullkeep always fetches one named remote." \
-             "git pullkeep  (fetches the current remote; run once per remote)" ;;
+    --autostash|--no-autostash)   warn "autostash options ignored: pullkeep never uses a stash" ;;
+    # ---- refused only when files must be parked (relayed verbatim otherwise)
+    --ff-only|--squash|--no-commit|--all|--allow-unrelated-histories|\
     --rebase=interactive|--rebase=i|-i)
-      reject "--rebase=interactive needs a terminal and cannot be scripted." "git pull --rebase  (plain rebase)" ;;
+      blocked_opts+=("$a") ;;
+    --set-upstream|-u)            SET_UPSTREAM=1; pull_args+=("$a") ;;
     # ---- strategy
     --rebase|-r)                  STRATEGY=rebase; REBASE_OPT=--rebase ;;
     --rebase=*)                   STRATEGY=rebase; REBASE_OPT="$a" ;;
     -r=*)                         STRATEGY=rebase; REBASE_OPT="--rebase=${a#-r=}" ;;
     --no-rebase)                  STRATEGY=merge ;;
-    # ---- fetch options: relayed to git pull and to the pre-flight fetch
-    -p|--prune|--tags|--no-tags|--all|--force|-f|--no-progress|--progress)
+    # ---- fetch options: relayed to the pre-flight fetch and to git pull
+    -p|--prune|--tags|--no-tags|--force|-f|--no-progress|--progress|\
+    --unshallow|--update-shallow|--recurse-submodules|--no-recurse-submodules)
                                   fetch_args+=("$a"); pull_args+=("$a") ;;
-    --depth=*|--deepen=*|--shallow-since=*|--shallow-exclude=*|--jobs=*)
+    --depth=*|--deepen=*|--shallow-since=*|--shallow-exclude=*|--jobs=*|\
+    --negotiation-tip=*|--refmap=*|--submodule-prefix=*|--upload-pack=*)
                                   fetch_args+=("$a"); pull_args+=("$a") ;;
     -j*)                          fetch_args+=("$a"); pull_args+=("$a") ;;
+    --depth|--deepen|--shallow-since|--shallow-exclude|--jobs|--negotiation-tip|\
+    --refmap|--submodule-prefix|--upload-pack)
+      [ $# -ge 2 ] || die "$a needs a value" 2
+      fetch_args+=("$a" "$2"); pull_args+=("$a" "$2"); shift ;;
     # ---- merge options with a separate value
     -X|-s|--strategy)
       [ $# -ge 2 ] || die "$a needs a value" 2
       pull_args+=("$a" "$2"); shift ;;
-    # ---- merge / output options
+    # ---- merge / pull options relayed verbatim
     -X*|-s*|--strategy=*|--no-ff|--ff|--no-edit|--edit|--no-verify|--no-verify-signatures|\
-    --signoff|--log|--no-log|--stat|--no-stat|-n|--summary|--quiet|-q|--verbose|-v)
+    --verify-signatures|--signoff|--log|--no-log|--stat|--no-stat|-n|--summary|--quiet|-q|\
+    --verbose|-v|--commit|--recurse-submodules=*)
                                   pull_args+=("$a") ;;
     --) break ;;
-    -*)                           err "unknown option: $a"; err "try: git pullkeep -h"; exit 2 ;;
+    -*)                           warn "unrecognised option $a is relayed to git pull"; pull_args+=("$a") ;;
     *)
       if [ -z "$REMOTE" ]; then
         REMOTE="$a"
@@ -461,7 +459,7 @@ if [ -n "$REMOTE" ]; then
   up_ref_arg="$upstream"
 else
   upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null) \
-    || die "branch $branch has no upstream; run: git branch -u origin/$branch" 30
+    || die "branch $branch has no upstream; run: git branch -u origin/$branch$( [ "$SET_UPSTREAM" -eq 1 ] && printf ', or pass the branch: git pullkeep origin %s --set-upstream' "$branch" )" 30
   up_ref_arg='@{upstream}'
   REMOTE=${upstream%%/*}
   BRANCH=${upstream#*/}
@@ -582,6 +580,30 @@ if [ "${#moddel[@]}" -gt 0 ]; then
   say "         resolve with 'git rm <file>' (keep your deletion) or 'git add <file>' (take upstream)"
 fi
 say ""
+
+# Options that fight the parking mechanism are relayed verbatim on pulls that stay native
+# (nothing to park) and refused only when pullkeep actually has to create its commit layer.
+if [ "${#park_real[@]}" -gt 0 ] && [ "${#blocked_opts[@]}" -gt 0 ]; then
+  for b in "${blocked_opts[@]}"; do
+    case "$b" in
+      --ff-only)
+        reject "--ff-only cannot work with pullkeep: pullkeep commits blocked files locally, so the update is never a fast-forward." \
+               "git pull --ff-only --autostash" ;;
+      --squash)
+        reject "--squash is incompatible: it creates no commit to collapse afterwards." \
+               "git pull --squash  (on a clean tree)" ;;
+      --no-commit)
+        reject "--no-commit is incompatible: pullkeep needs the commit layer to restore your changes." ;;
+      --allow-unrelated-histories)
+        reject "--allow-unrelated-histories is incompatible: without a merge base there is no overlap to analyse." ;;
+      --all)
+        reject "--all cannot be relayed once files must be parked: 'git fetch --all' rejects explicit refspecs, and pullkeep always fetches one named remote." \
+               "git pullkeep  (fetches the current remote; run once per remote)" ;;
+      *)
+        reject "$b needs a terminal and cannot be scripted when files must be parked." "git pullkeep --rebase  (plain rebase)" ;;
+    esac
+  done
+fi
 
 if [ "$MODE" = "check" ]; then
   if [ "${#park_real[@]}" -gt 0 ] || [ "${#collide[@]}" -gt 0 ] || [ "${#moddel[@]}" -gt 0 ]; then

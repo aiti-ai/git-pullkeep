@@ -89,10 +89,12 @@ done. on origin/main (a1b2c3d4), 72 dirty file(s) still uncommitted.
 
 Read this before you trust it with a hairy working tree:
 
-- **`--ff-only`, `--squash`, `--no-commit`, `--all`, `--rebase=interactive` and
-  `--allow-unrelated-histories` are refused** (exit 21), by design: parking the blocking files
-  creates a local commit, so the update can never be a fast-forward and there must be a commit
-  layer left to collapse.
+- **`--ff-only`, `--squash`, `--no-commit`, `--all` and `--rebase=interactive` are refused — but
+  only when files must actually be parked** (exit 21). When nothing overlaps (the pull stays a
+  native one) they are relayed verbatim and `git pull` itself decides, so a clean pull with
+  `--ff-only` just works. Parking the blocking files creates a local commit, which is why those
+  options cannot survive a parked run: the update is never a fast-forward, and there must be a
+  commit layer left to collapse.
 - **True conflicts still need you.** pullkeep stops at the first merge/rebase conflict (exit 20);
   it never edits conflict markers. Resolve, then `git pullkeep --continue` — or `--undo -y` to
   walk away with the exact pre-pull state.
@@ -124,7 +126,7 @@ consults a registry.
 **Any platform (npm)**
 
 ```sh
-npm install -g git-pullkeep       # from v0.1.2 on; before that use the installers below
+npm install -g git-pullkeep       # from v0.1.3 on; before that use the installers below
 npx git-pullkeep --dry-run        # try it without installing anything
 ```
 
@@ -171,18 +173,23 @@ git pullkeep origin main     # explicit remote/branch instead of @{upstream}
 git pullkeep -h              # help  (use -h: `--help` is hijacked by `git help`)
 ```
 
-### Relayed `git pull` options
+### Compatibility with `git pull`
 
-| Option | Behaviour |
+The goal is a drop-in: **everything `git pull` accepts is relayed verbatim** — strategy flags
+(`--rebase[=merges]`, `--no-rebase`), fetch flags (`--prune`, `--tags`, `--force`, `--depth`,
+`--unshallow`, `--recurse-submodules`, `--negotiation-tip`, …), merge flags (`--no-ff`, `-X`,
+`-s`, `--log`, `--stat`, `--signoff`, `--verify-signatures`, …), `--set-upstream`, positional
+`<remote> <branch>`, and anything yet unknown (relayed with a warning, so future `git pull`
+options keep working). `--autostash` / `--no-autostash` are accepted and ignored — keeping
+your changes is pullkeep's whole job. Only when the run actually has to park files are five
+combinations refused (exit 21, with a reason and an alternative):
+
+| Refused while parking | Why |
 |---|---|
-| `--rebase`, `-r`, `--rebase=merges` | supported; the flavour is relayed verbatim, so `--rebase=merges` still preserves merge commits. Rebase needs a clean tree, so **all** dirty tracked files are parked and restored |
-| `--no-rebase` | merge (default; explicitly overrides `pull.rebase` from your config) |
-| `--no-ff`, `--ff`, `-X <opt>`, `-s <strategy>`, `--no-edit`, `--signoff` | relayed to the merge |
-| `--prune`, `-p`, `--tags`, `--no-tags`, `--force`, `--depth=N`, `--jobs=N` | relayed to the fetch (and to `git pull`) |
-| `--ff-only` | **rejected** (exit 21) — parking files requires a local commit, so the update can never be a fast-forward |
-| `--squash`, `--no-commit` | **rejected** (exit 21) — there is no commit layer to collapse afterwards |
-| `--allow-unrelated-histories`, `--rebase=interactive` | **rejected** — no merge base to analyse / needs a terminal |
-| `--all` | **rejected** — `git fetch --all` refuses explicit refspecs, and pullkeep always fetches one named remote |
+| `--ff-only` | the parked files create a local commit, so the update is never a fast-forward |
+| `--squash` / `--no-commit` | there must be a commit layer left to collapse |
+| `--all` | the pre-flight analysis fetches one named remote; `git fetch --all` rejects refspecs |
+| `--rebase=interactive` | cannot be scripted, and the parked rebase must finish unattended |
 
 ### Exit codes
 
@@ -290,7 +297,7 @@ The two kinds of "another run" failure are different on purpose: **35** means *w
 ## Development
 
 ```sh
-bash tests/run-tests.sh      # 24 scenarios / 138 assertions in throwaway repositories
+bash tests/run-tests.sh      # 28 scenarios / 154 assertions in throwaway repositories
 shellcheck -s bash git-pullkeep
 ```
 

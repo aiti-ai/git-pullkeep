@@ -83,15 +83,16 @@ done. on origin/main (a1b2c3d4), 72 dirty file(s) still uncommitted.
 | 🔒 并发运行 | **同一仓库同一时刻只允许一个写操作**，第二个直接 exit 35，不在 index 上抢 | 完全无协调：两次运行可能同时改写 index 和 stash |
 | 📄 未跟踪文件 vs 上游新文件 | 自动挪开保住本地版，拉取继续 | 拉取直接中止，要手动挪走才能拉 |
 | ⚙️ 参数透传 | fetch + merge + `--rebase[=merges]`，你写的写法原样传下去 | `git pull` 支持什么就支持什么 |
-| ⚠️ 不支持 | `--ff-only`、`--squash`、`--no-commit`（有意拒绝，exit 21） | 全部支持 |
+| ⚠️ 不支持 | 仅当需要收进文件时才拒绝 `--ff-only`/`--squash`/`--no-commit` 等，其余原样透传 | 全部支持 |
 
 ## 局限
 
 把脏工作区交给它之前，先读这一节：
 
-- **`--ff-only`、`--squash`、`--no-commit`、`--all`、`--rebase=interactive`、
-  `--allow-unrelated-histories` 一律拒绝**（exit 21），这是设计使然：收进挡路文件必然产生本地
-  提交，更新永远不可能是快进；也必须留一个提交层供事后拆解。
+- **`--ff-only`、`--squash`、`--no-commit`、`--all`、`--rebase=interactive` 只在确实需要收进
+  文件时才拒绝**（exit 21）。没有重叠（拉取保持原生）时它们原样透传、由 `git pull` 自己裁决，
+  干净树的 `--ff-only` 直接可用。收进挡路文件必然产生本地提交——这正是这些组合无法在收进
+  运行中存活的原因：更新不可能是快进，也必须留一个提交层供事后拆解。
 - **真冲突仍然需要人**。pullkeep 在第一个合并/变基冲突处停下（exit 20），绝不替你改冲突标记。
   解决后 `git pullkeep --continue` 继续，或者 `--undo -y` 拿着操作前的精确状态离场。
 - **分叉不是魔法。** 本地和上游各走出几十个提交时，冲突与裸 pull 一模一样会发生；pullkeep
@@ -119,7 +120,7 @@ done. on origin/main (a1b2c3d4), 72 dirty file(s) still uncommitted.
 **全平台（npm）**
 
 ```sh
-npm install -g git-pullkeep       # v0.1.2 起可用；在此之前请用下面的安装脚本
+npm install -g git-pullkeep       # v0.1.3 起可用；在此之前请用下面的安装脚本
 npx git-pullkeep --dry-run        # 不安装也能直接试
 ```
 
@@ -167,18 +168,22 @@ git pullkeep origin main     # 显式指定 remote/branch，替代 @{upstream}
 git pullkeep -h              # 帮助（务必用 -h：--help 会被 git 接管去查 man 页）
 ```
 
-### 透传的 `git pull` 参数
+### 与 `git pull` 的兼容性
 
-| 参数 | 行为 |
+目标是即插即用：**`git pull` 接受的一切都原样透传**——策略类（`--rebase[=merges]`、
+`--no-rebase`）、fetch 类（`--prune`、`--tags`、`--force`、`--depth`、`--unshallow`、
+`--recurse-submodules`、`--negotiation-tip` 等）、merge 类（`--no-ff`、`-X`、`-s`、`--log`、
+`--stat`、`--signoff`、`--verify-signatures` 等）、`--set-upstream`、位置参数
+`<remote> <branch>`，以及一切尚不认识的选项（附带警告透传，git 未来新增参数照常能用）。
+`--autostash` / `--no-autostash` 接受但忽略——保留你的改动本来就是 pullkeep 的全部工作。
+只有当本次运行确实需要收进文件时，才有五种组合被拒绝（exit 21，附原因与替代命令）：
+
+| 收进文件时拒绝 | 原因 |
 |---|---|
-| `--rebase`、`-r`、`--rebase=merges` | 支持；写法原样透传，`--rebase=merges` 仍会保留合并提交。rebase 要求干净工作区，因此**所有**已跟踪脏文件都会临时收进提交、事后还原 |
-| `--no-rebase` | merge（默认；显式覆盖配置里的 `pull.rebase`） |
-| `--no-ff`、`--ff`、`-X <opt>`、`-s <strategy>`、`--no-edit`、`--signoff` | 透传给合并 |
-| `--prune`、`-p`、`--tags`、`--no-tags`、`--force`、`--depth=N`、`--jobs=N` | 透传给 fetch（以及 `git pull`） |
-| `--ff-only` | **拒绝**（退出码 21）：要挪开文件就必须产生本地提交，因此本次更新不可能是快进 |
-| `--squash`、`--no-commit` | **拒绝**（退出码 21）：没有提交层可供事后拆解 |
-| `--allow-unrelated-histories`、`--rebase=interactive` | **拒绝**：无共同祖先无法做重叠分析 / 需要终端交互 |
-| `--all` | **拒绝**：`git fetch --all` 不接受显式 refspec，而 pullkeep 总是按名抓取单个远端分支 |
+| `--ff-only` | 收进的文件会产生本地提交，更新永远不可能是快进 |
+| `--squash` / `--no-commit` | 必须留下一个提交层供事后拆解 |
+| `--all` | 预检 fetch 按名抓取单个远端，`git fetch --all` 拒绝显式 refspec |
+| `--rebase=interactive` | 无法脚本化，收进的变基必须无人值守地完成 |
 
 ### 退出码
 
@@ -279,7 +284,7 @@ $ echo $?
 ## 开发与测试
 
 ```sh
-bash tests/run-tests.sh      # 24 组场景 / 138 条断言，全部在临时仓库内运行
+bash tests/run-tests.sh      # 28 组场景 / 154 条断言，全部在临时仓库内运行
 shellcheck -s bash git-pullkeep
 ```
 
