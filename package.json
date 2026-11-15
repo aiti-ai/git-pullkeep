@@ -25,7 +25,7 @@
   "license": "MIT",
   "author": "aiti-ai",
   "bin": {
-    "git-pullkeep": "./git-pullkeep"
+    "git-pullkeep": "git-pullkeep"
   },
   "man": "./man/git-pullkeep.1",
   "files": [

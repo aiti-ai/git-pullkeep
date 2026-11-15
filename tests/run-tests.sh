@@ -17,6 +17,36 @@ ok()    { printf '  [PASS] %s\n' "$*"; PASS=$((PASS+1)); }
 bad()   { printf '  [FAIL] %s\n' "$*"; FAIL=$((FAIL+1)); }
 check() { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 
+# BSD/macOS sed has no suffix-less `sed -i`: it consumes the next argument as the backup
+# suffix and silently corrupts every in-place edit (GNU sed accepts the same call). The
+# suite is written with plain GNU-style `sed -i` on exactly one file per call, so put a
+# tiny wrapper ahead on PATH that emulates that everywhere and leaves no backup behind.
+# The real sed is resolved BEFORE the wrapper dir is prepended and baked in as an absolute
+# path, so the wrapper cannot recurse into itself through PATH.
+mkdir -p "$WORKROOT/bin"
+real_sed=$(type -ap sed | while IFS= read -r p; do
+  [ -x "$p" ] || continue
+  case "$p" in "$WORKROOT/bin/sed") continue ;; esac
+  printf '%s\n' "$p"; break
+done)
+cat > "$WORKROOT/bin/sed" <<WRAPPER
+#!/usr/bin/env bash
+if [ "\$1" = "-i" ] && [ \$# -ge 3 ]; then
+  shift
+  last=""; rest=()
+  for a in "\$@"; do
+    [ -n "\$last" ] && rest+=("\$last")
+    last=\$a
+  done
+  "$real_sed" -i.bak "\${rest[@]}" "\$last" && rm -f "\$last.bak"
+else
+  exec "$real_sed" "\$@"
+fi
+WRAPPER
+chmod +x "$WORKROOT/bin/sed"
+PATH="$WORKROOT/bin:$PATH"
+export PATH
+
 mk() { # mk <name>: create the origin.git + seed + work triad
   local d="$WORKROOT/$1"
   mkdir -p "$d"
@@ -287,10 +317,10 @@ echo "== S15 a submodule: the cycle runs inside the module's own git dir =="
 mk s15
 mkdir -p "$WORKROOT/s15/subrepo"
 cd "$WORKROOT/s15/subrepo" || exit 1
-git init -q -b main . && git config user.email t@t && git config user.name t
+git init -q . && git checkout -q -B main 2>/dev/null; git config user.email t@t && git config user.name t
 seq 1 5 > m.txt && git add m.txt && git commit -qm init
-git init -q --bare --initial-branch=main "$WORKROOT/s15/sub-origin.git"
-git remote add origin "$WORKROOT/s15/sub-origin.git" && git push -q -u origin main
+git init -q --bare "$WORKROOT/s15/sub-origin.git" && git -C "$WORKROOT/s15/sub-origin.git" symbolic-ref HEAD refs/heads/main
+git remote add origin "$WORKROOT/s15/sub-origin.git" && git push -q -u origin HEAD:main
 cd "$WORKROOT/s15/work" || exit 1
 git -c protocol.file.allow=always submodule add -q "$WORKROOT/s15/sub-origin.git" mod 2>/dev/null
 cd "$WORKROOT/s15/work/mod" || exit 1
@@ -364,11 +394,11 @@ check "no lock survives a successful run" '[ ! -d "$gcd/pullkeep.lock" ]'
 # ---- a commit object needs user.name/user.email; --dry-run must still work without them
 idir="$WORKROOT/s18i"
 mkdir -p "$idir/nohome"
-git init -q --bare --initial-branch=main "$idir/origin.git"
+git init -q --bare "$idir/origin.git" && git -C "$idir/origin.git" symbolic-ref HEAD refs/heads/main
 git clone -q "$idir/origin.git" "$idir/seed" 2>/dev/null
 cd "$idir/seed" || exit 1
 git config user.email t@t; git config user.name t
-seq 1 10 > a.txt; git add a.txt; git commit -qm init; git push -q origin main
+seq 1 10 > a.txt; git add a.txt; git commit -qm init; git push -q origin HEAD:main
 git clone -q "$idir/origin.git" "$idir/work" 2>/dev/null
 git checkout -q -B main origin/main; git branch -q --set-upstream-to=origin/main main
 sed -i 's/^10$/ten/' a.txt && git commit -qam up && git push -q origin main
@@ -410,7 +440,7 @@ publishwf="$HERE/../.github/workflows/publish.yml"
 pkgver=$(sed -n 's/^VERSION=//p' "$SCRIPT" | head -n 1)
 check "package.json sits next to the script" '[ -f "$pkgjson" ]'
 check "its version matches VERSION=$pkgver" 'grep -qF "\"version\": \"$pkgver\"," "$pkgjson"'
-check "bin maps git-pullkeep to the script" 'grep -qF "\"./git-pullkeep\"" "$pkgjson"'
+check "bin maps git-pullkeep to the script" 'grep -qF "\"git-pullkeep\": \"git-pullkeep\"" "$pkgjson" || grep -qF "\"git-pullkeep\": \"./git-pullkeep\"" "$pkgjson"'
 check "the man page is declared" 'grep -qF "man/git-pullkeep.1" "$pkgjson"'
 check "the tarball ships the Chinese readme" 'grep -qF "README_zh.md" "$pkgjson"'
 check "prepublishOnly re-runs this suite" 'grep -qF "bash tests/run-tests.sh" "$pkgjson"'
