@@ -10,6 +10,28 @@
 
 `git pull` that never loses your uncommitted work — and never stashes the whole tree.
 
+## Why
+
+Real repositories are full of uncommitted work that is *supposed* to sit there for days: local
+config tweaks, half-finished refactors, machine-specific edits, plan notes. On any machine that
+tracks upstream, every `git pull` is a lottery: the moment upstream touches a file you have
+locally dirty, the pull refuses — and the usual escape hatches are all worse than the problem:
+
+- `git stash` + `git pull` + `git stash pop` moves **everything**, forgets what was staged, and
+  on conflict leaves you with conflict markers scattered over files your pull never cared about.
+- `git pull --autostash` is the same in one command: the whole tree goes into one stash, the
+  restore is one big three-way merge, an untracked file that upstream now claims aborts the
+  pull outright, and if anything interrupts the run you are left guessing whether the pop ever
+  happened. Staged changes come back unstaged.
+- Committing the work-in-progress just to pull pollutes history with `wip:` noise that has to
+  be cleaned up later.
+
+`git pullkeep` follows a different principle: **move the minimum, prove that you moved nothing
+else, and make every step reversible.** Only the paths that genuinely block the pull are parked
+in a labelled temporary commit; the other 70 dirty files are never touched; a snapshot ref
+before the run makes `--undo` exact; and the after-state is verified against the before-state
+and printed, so "did it change anything else?" is a fact, not a hope.
+
 ```console
 $ git status --short
  M src/api/client.ts
@@ -59,8 +81,38 @@ done. on origin/main (a1b2c3d4), 72 dirty file(s) still uncommitted.
 | ↩️ Recovery | **`--undo` restores the exact pre-pull tree**, untracked files included | `git stash list` archaeology |
 | 🔁 Interrupted run | leftover temp commit is detected (exit 31) and collapsible via `--continue` / `--recover` | a stray stash entry is easy to lose |
 | 🔒 Concurrent runs | **one writing run at a time**; a second one exits 35 instead of racing on the index | no coordination at all: two runs can both rewrite the index and the stash |
+| 📄 Untracked file vs upstream new file | moved aside, local copy kept, pull proceeds | pull aborts until you move it manually |
 | ⚙️ Relayed options | fetch + merge + `--rebase[=merges]`, the flavour you typed is passed on unchanged | whatever `git pull` accepts |
 | ⚠️ Not supported | `--ff-only`, `--squash`, `--no-commit` (refused on purpose, exit 21) | all of them |
+
+## Limitations
+
+Read this before you trust it with a hairy working tree:
+
+- **`--ff-only`, `--squash`, `--no-commit`, `--all`, `--rebase=interactive` and
+  `--allow-unrelated-histories` are refused** (exit 21), by design: parking the blocking files
+  creates a local commit, so the update can never be a fast-forward and there must be a commit
+  layer left to collapse.
+- **True conflicts still need you.** pullkeep stops at the first merge/rebase conflict (exit 20);
+  it never edits conflict markers. Resolve, then `git pullkeep --continue` — or `--undo -y` to
+  walk away with the exact pre-pull state.
+- **Diverged branches are not magic.** If local and upstream have both moved for dozens of
+  commits, the conflict happens exactly as it would with a plain pull; pullkeep just makes the
+  bail-out (`--undo`) safe.
+- **`--rebase` parks every dirty tracked file**, because rebase itself demands a clean tree. The
+  "only the blocking files move" property applies to merge mode.
+- **Merge mode parks staged entries outside the overlap too.** `git merge` refuses to start while
+  the index differs from `HEAD`, even for paths it never touches, so staged entries block the
+  pull just like overlapping edits and are parked and restored like one.
+- **A file with different staged vs worktree content collapses to one layer on success.** The
+  staged copy of the round trip keeps the worktree version (now staged); the separately staged
+  version survives only in the snapshot — `--undo` restores both layers exactly.
+- **Between start and collapse your changes are real commits** (the temp commit). That is what
+  makes the pull possible; the `pullkeep-temp:` trailer makes such commits detectable forever,
+  and `--recover` / `--undo` clean them up. Do not build on top of them by hand.
+- **Write modes need `user.name` / `user.email`** (they create commit objects); `--dry-run` and
+  `--check` do not. Git ≥ 2.23, bash ≥ 3.2, and on Windows the `git pullkeep` subcommand form
+  (Git for Windows ≥ 2.30) — not the bare npm shim, which can pick up WSL's bash.
 
 ## Install
 
@@ -72,7 +124,7 @@ consults a registry.
 **Any platform (npm)**
 
 ```sh
-npm install -g git-pullkeep       # from v0.1.0 on; before that use the installers below
+npm install -g git-pullkeep       # from v0.1.1 on; before that use the installers below
 npx git-pullkeep --dry-run        # try it without installing anything
 ```
 
@@ -226,7 +278,7 @@ The two kinds of "another run" failure are different on purpose: **35** means *w
 
 ## Compatibility
 
-- Git ≥ 2.23; tested on 2.39 and 2.51.
+- Git ≥ 2.23; tested on 2.24 (macOS), 2.39, 2.48, 2.51 and 2.55.
 - bash ≥ 3.2 — macOS system bash works (no `mapfile`, no associative arrays).
 - POSIX utilities only — no `jq`, no `python`, no `perl`.
 - `user.name` and `user.email` must be configured (every write path creates a commit object).
@@ -238,7 +290,7 @@ The two kinds of "another run" failure are different on purpose: **35** means *w
 ## Development
 
 ```sh
-bash tests/run-tests.sh      # 21 scenarios / 126 assertions in throwaway repositories
+bash tests/run-tests.sh      # 24 scenarios / 138 assertions in throwaway repositories
 shellcheck -s bash git-pullkeep
 ```
 

@@ -1,7 +1,7 @@
 # git-pullkeep
 
-[![star](https://gitee.com/aiti-ai/git-pullkeep/badge/star.svg?theme=dark)](https://gitee.com/aiti-ai/git-pullkeep/stargazers)
-[![fork](https://gitee.com/aiti-ai/git-pullkeep/badge/fork.svg?theme=dark)](https://gitee.com/aiti-ai/git-pullkeep/members)
+[![CI](https://github.com/aiti-ai/git-pullkeep/actions/workflows/test.yml/badge.svg)](https://github.com/aiti-ai/git-pullkeep/actions/workflows/test.yml)
+[![Release](https://img.shields.io/github/v/release/aiti-ai/git-pullkeep)](https://github.com/aiti-ai/git-pullkeep/releases)
 ![MIT](https://img.shields.io/badge/license-MIT-green.svg)
 [![npm](https://img.shields.io/npm/v/git-pullkeep)](https://www.npmjs.com/package/git-pullkeep)
 ![platform](https://img.shields.io/badge/平台-Linux%20%7C%20macOS%20%7C%20Windows-blue.svg)
@@ -11,6 +11,23 @@
 `git pull` 因本地改动与上游改动重叠而失败时，**只把真正挡住拉取的那几个文件临时收进一个提交**，
 让这几个路径上的工作区变干净、拉取得以通过；其余脏文件全程留在工作区不动。
 拉取成功后自动把这个提交拆回未提交状态——本地改动、暂存（staged）状态、未跟踪文件全部原样保留。
+
+## 动机
+
+真实的仓库里永远躺着大量**本来就该长期不提交**的本地改动：本机配置、改到一半的重构、机器专属
+修改、方案笔记。任何一台跟踪上游的机器上，每次 `git pull` 都是抽奖：上游一旦碰到你本地改过的
+文件，拉取直接拒绝——而惯用的逃生通道全都比问题本身更糟：
+
+- `git stash` + `git pull` + `git stash pop` 挪动**整个工作区**，忘记哪些是 staged 的，一旦
+  恢复冲突，冲突标记撒满拉取根本不关心的文件。
+- `git pull --autostash` 是同一件事的一条命令版：整棵树进一个 stash，恢复是一次大三方合并；
+  未跟踪文件与上游新文件同名时拉取直接中止；中途被打断就永远说不清 pop 到底发生过没有；
+  staged 改动回来全部变成未暂存。
+- 为了拉一次代码把半成品提交进历史，事后还得清理 `wip:` 噪音。
+
+`git pullkeep` 的原则不同：**挪得最少、证明没动别的、每一步可回滚。** 只有真正挡住拉取的路径
+被收进带标记的临时提交；其余 70 个脏文件从头到尾没被碰过；操作前的快照 ref 让 `--undo` 精确
+还原；操作后的状态与操作前逐条比对并打印出来——“有没有动到别的东西”是可核对的事实，不是承诺。
 
 ```console
 $ git status --short
@@ -64,8 +81,34 @@ done. on origin/main (a1b2c3d4), 72 dirty file(s) still uncommitted.
 | ↩️ 回滚 | **`--undo` 精确回到操作前**，含未跟踪文件 | 只能翻 `git stash list` 人工排查 |
 | 🔁 中断后重跑 | 残留临时提交可检出（exit 31），用 `--continue` / `--recover` 收敛 | 零散的 stash 记录容易丢 |
 | 🔒 并发运行 | **同一仓库同一时刻只允许一个写操作**，第二个直接 exit 35，不在 index 上抢 | 完全无协调：两次运行可能同时改写 index 和 stash |
+| 📄 未跟踪文件 vs 上游新文件 | 自动挪开保住本地版，拉取继续 | 拉取直接中止，要手动挪走才能拉 |
 | ⚙️ 参数透传 | fetch + merge + `--rebase[=merges]`，你写的写法原样传下去 | `git pull` 支持什么就支持什么 |
 | ⚠️ 不支持 | `--ff-only`、`--squash`、`--no-commit`（有意拒绝，exit 21） | 全部支持 |
+
+## 局限
+
+把脏工作区交给它之前，先读这一节：
+
+- **`--ff-only`、`--squash`、`--no-commit`、`--all`、`--rebase=interactive`、
+  `--allow-unrelated-histories` 一律拒绝**（exit 21），这是设计使然：收进挡路文件必然产生本地
+  提交，更新永远不可能是快进；也必须留一个提交层供事后拆解。
+- **真冲突仍然需要人**。pullkeep 在第一个合并/变基冲突处停下（exit 20），绝不替你改冲突标记。
+  解决后 `git pullkeep --continue` 继续，或者 `--undo -y` 拿着操作前的精确状态离场。
+- **分叉不是魔法。** 本地和上游各走出几十个提交时，冲突与裸 pull 一模一样会发生；pullkeep
+  只是让退场（`--undo`）变安全。
+- **`--rebase` 会收进全部已跟踪脏文件**——rebase 本身要求干净工作区。“只动挡路文件”的性质
+  只属于 merge 模式。
+- **merge 模式会把重叠之外的 staged 条目一并收走**。`git merge` 在 index 与 HEAD 不一致时
+  直接拒绝启动，哪怕合并根本不碰那些路径；所以 staged 条目和挡路文件同等对待，一并收进、
+  事后还原。
+- **staged 与工作区内容不同的文件，成功路径会塌成一层**：staged 副本保留工作区版本（并保持
+  staged）；单独暂存的那个版本只活在快照里——`--undo` 可以把两层精确还原。
+- **从开始到拆解之间，你的改动是真实提交**（临时提交）。这正是拉取得以进行的原因；
+  `pullkeep-temp:` trailer 让这种提交永远可识别，`--recover` / `--undo` 负责收尾。
+  不要手动在它之上叠提交。
+- **写模式需要 `user.name` / `user.email`**（要创建 commit 对象）；`--dry-run` 和 `--check`
+  不需要。Git ≥ 2.23、bash ≥ 3.2；Windows 上请用 `git pullkeep` 子命令形式
+  （Git for Windows ≥ 2.30），不要用 npm 的裸 shim——它可能命中 WSL 的 bash。
 
 ## 安装
 
@@ -76,7 +119,7 @@ done. on origin/main (a1b2c3d4), 72 dirty file(s) still uncommitted.
 **全平台（npm）**
 
 ```sh
-npm install -g git-pullkeep       # v0.1.0 起可用；在此之前请用下面的安装脚本
+npm install -g git-pullkeep       # v0.1.1 起可用；在此之前请用下面的安装脚本
 npx git-pullkeep --dry-run        # 不安装也能直接试
 ```
 
@@ -224,7 +267,7 @@ $ echo $?
 
 ## 兼容性
 
-- Git ≥ 2.23；已在 2.39 / 2.51 上验证。
+- Git ≥ 2.23；已在 2.24（macOS）/ 2.39 / 2.48 / 2.51 / 2.55 上验证。
 - bash ≥ 3.2：macOS 自带 bash 可用（不含 `mapfile`、不依赖关联数组）。
 - 仅使用 POSIX 工具，不依赖 `jq` / `python` / `perl`。
 - 必须配置 `user.name` 与 `user.email`（每条写路径都要创建 commit 对象）；`--dry-run` 和
@@ -236,7 +279,7 @@ $ echo $?
 ## 开发与测试
 
 ```sh
-bash tests/run-tests.sh      # 21 组场景 / 126 条断言，全部在临时仓库内运行
+bash tests/run-tests.sh      # 24 组场景 / 138 条断言，全部在临时仓库内运行
 shellcheck -s bash git-pullkeep
 ```
 
